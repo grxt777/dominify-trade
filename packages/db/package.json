@@ -8,8 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "drizzle-kit generate",
-    "migrate": "node dist/migrate.js",
-    "seed": "node dist/seed.js"
+    "migrate": "node --env-file-if-exists=../../.env dist/migrate.js",
+    "seed": "node --env-file-if-exists=../../.env dist/seed.js"
   },
   "dependencies": {
     "@dominify/shared": "workspace:*",
@@ -19,5 +19,9 @@
   "devDependencies": {
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.11"
-  }
+  },
+  "files": [
+    "dist",
+    "drizzle"
+  ]
 }

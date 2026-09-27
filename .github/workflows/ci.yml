@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, production]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 3s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
+      - run: pnpm install --frozen-lockfile
+      - name: Сборка общих пакетов
+        run: pnpm --filter @dominify/shared build && pnpm --filter @dominify/db build
+      - name: Типы
+        run: pnpm -r typecheck
+      - name: Юнит-тесты
+        run: pnpm --filter @dominify/shared test && pnpm --filter @dominify/server test
+      - name: Сборка фронтендов
+        run: pnpm --filter @dominify/miniapp build && pnpm --filter @dominify/admin build
+      - name: Сквозной сценарий
+        run: ./scripts/e2e-local.sh

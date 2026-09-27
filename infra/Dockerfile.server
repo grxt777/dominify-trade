@@ -1,0 +1,25 @@
+# Один образ для трёх процессов бэкенда: api, bot и worker отличаются только командой запуска.
+FROM node:22-slim AS build
+WORKDIR /repo
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/server/package.json apps/server/
+RUN pnpm install --frozen-lockfile --filter @dominify/server...
+COPY packages/shared packages/shared
+COPY packages/db packages/db
+COPY apps/server apps/server
+RUN pnpm --filter @dominify/shared build \
+ && pnpm --filter @dominify/db build \
+ && pnpm --filter @dominify/server build \
+ && pnpm --filter @dominify/server deploy --prod --legacy /out \
+ && cp -r apps/server/dist /out/dist
+
+FROM node:22-slim
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /out /app
+USER node
+# Railway задаёт команду запуска в конфиге сервиса; по умолчанию — api.
+CMD ["node", "dist/main.api.js"]

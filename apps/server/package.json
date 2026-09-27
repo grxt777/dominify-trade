@@ -9,9 +9,9 @@
     "start:api": "node dist/main.api.js",
     "start:bot": "node dist/main.bot.js",
     "start:worker": "node dist/main.worker.js",
-    "dev:api": "tsc-watch -p tsconfig.json --onSuccess \"node dist/main.api.js\"",
-    "dev:bot": "tsc-watch -p tsconfig.json --onSuccess \"node dist/main.bot.js\"",
-    "dev:worker": "tsc-watch -p tsconfig.json --onSuccess \"node dist/main.worker.js\"",
+    "dev:api": "tsc-watch -p tsconfig.json --onSuccess \"node --env-file-if-exists=../../.env dist/main.api.js\"",
+    "dev:bot": "tsc-watch -p tsconfig.json --onSuccess \"node --env-file-if-exists=../../.env dist/main.bot.js\"",
+    "dev:worker": "tsc-watch -p tsconfig.json --onSuccess \"node --env-file-if-exists=../../.env dist/main.worker.js\"",
     "e2e": "node dist/e2e/run.js"
   },
   "dependencies": {

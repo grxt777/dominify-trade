@@ -1,0 +1,30 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "infra/Dockerfile.server",
+    "watchPatterns": [
+      "apps/server/**",
+      "packages/**",
+      "pnpm-lock.yaml",
+      "infra/Dockerfile.server"
+    ]
+  },
+  "deploy": {
+    "startCommand": "node dist/main.api.js",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10,
+    "drainingSeconds": 30,
+    "multiRegionConfig": {
+      "europe-west4-drams3a": {
+        "numReplicas": 1
+      }
+    },
+    "preDeployCommand": [
+      "node node_modules/@dominify/db/dist/migrate.js",
+      "node node_modules/@dominify/db/dist/seed.js"
+    ],
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 60
+  }
+}

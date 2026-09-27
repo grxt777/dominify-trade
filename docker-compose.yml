@@ -1,0 +1,54 @@
+# Локальная инфраструктура: Postgres и Redis. Сам код запускается командами pnpm (см. README).
+# Полный стек в контейнерах: docker compose --profile app up --build
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dominify
+    ports: ["5432:5432"]
+    volumes: [pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  api:
+    profiles: [app]
+    build: { context: ., dockerfile: infra/Dockerfile.server }
+    command: sh -c "node node_modules/@dominify/db/dist/migrate.js && node node_modules/@dominify/db/dist/seed.js && node dist/main.api.js"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/dominify
+      REDIS_URL: redis://redis:6379
+      LOCAL_STORAGE_DIR: /tmp/uploads
+    ports: ["3000:3000"]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
+
+  worker:
+    profiles: [app]
+    build: { context: ., dockerfile: infra/Dockerfile.server }
+    command: node dist/main.worker.js
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/dominify
+      REDIS_URL: redis://redis:6379
+    depends_on: [api]
+
+  bot:
+    profiles: [app]
+    build: { context: ., dockerfile: infra/Dockerfile.server }
+    command: node dist/main.bot.js
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/dominify
+      REDIS_URL: redis://redis:6379
+      BOT_MODE: polling
+    depends_on: [api]
+
+volumes:
+  pg: {}

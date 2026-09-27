@@ -1,0 +1,20 @@
+# Статика Mini App или админки: сборка Vite и раздача через Caddy с SPA-фолбэком.
+# APP = miniapp | admin. Переменные VITE_* Railway передаёт как build args.
+FROM node:22-slim AS build
+ARG APP=miniapp
+ARG VITE_API_URL
+ARG VITE_BOT_USERNAME
+ARG VITE_SUPPORT_URL
+WORKDIR /repo
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY apps/${APP}/package.json apps/${APP}/
+RUN pnpm install --frozen-lockfile --filter @dominify/${APP}...
+COPY packages/shared packages/shared
+COPY apps/${APP} apps/${APP}
+RUN pnpm --filter @dominify/${APP} build && cp -r apps/${APP}/dist /site
+
+FROM caddy:2-alpine
+COPY infra/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /site /srv
