@@ -1,0 +1,29 @@
+{
+  "name": "dominify-trade",
+  "private": true,
+  "version": "0.1.0",
+  "description": "B2B-маркетплейс заявок: Telegram Mini App, бот, api и воркер",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/** run build && pnpm -r --filter ./apps/** run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "db:generate": "pnpm --filter @dominify/db run generate",
+    "db:migrate": "pnpm --filter @dominify/db run migrate",
+    "db:seed": "pnpm --filter @dominify/db run seed",
+    "dev:api": "pnpm --filter @dominify/server run dev:api",
+    "dev:bot": "pnpm --filter @dominify/server run dev:bot",
+    "dev:worker": "pnpm --filter @dominify/server run dev:worker",
+    "dev:miniapp": "pnpm --filter @dominify/miniapp run dev",
+    "dev:admin": "pnpm --filter @dominify/admin run dev",
+    "e2e": "pnpm --filter @dominify/server run e2e"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.7"
+  }
+}
