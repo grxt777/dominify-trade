@@ -21,19 +21,17 @@ export class StorageService {
         ? new S3Client({
             region: cfg.S3_REGION,
             endpoint: cfg.S3_ENDPOINT || undefined,
-            forcePathStyle: true,
+            forcePathStyle: cfg.S3_FORCE_PATH_STYLE,
             credentials: { accessKeyId: cfg.S3_ACCESS_KEY_ID, secretAccessKey: cfg.S3_SECRET_ACCESS_KEY },
           })
         : null;
   }
 
-  /** Ссылка, по которой клиент сам загрузит файл методом PUT. */
-  async uploadUrl(key: string, mime: string, ttlSec = 600): Promise<string> {
-    if (this.s3) {
-      return getSignedUrl(this.s3, new PutObjectCommand({ Bucket: this.cfg.S3_BUCKET, Key: key, ContentType: mime }), {
-        expiresIn: ttlSec,
-      });
-    }
+  /**
+   * Ссылка, по которой клиент загрузит файл методом PUT. Загрузка всегда идёт через api:
+   * так не нужен CORS на бакете, а api сам кладёт файл в хранилище.
+   */
+  async uploadUrl(key: string, _mime: string, ttlSec = 600): Promise<string> {
     return `${this.cfg.PUBLIC_API_URL}/v1/files/local/${encodeURIComponent(key)}?${this.localSig(key, 'put', ttlSec)}`;
   }
 

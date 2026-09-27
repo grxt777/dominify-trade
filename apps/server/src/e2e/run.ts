@@ -159,7 +159,17 @@ async function main() {
   ok(plan6.data.planCode === 'free' && plan6.data.notifyDelayMin === 15, 'неоплаченный поставщик на бесплатном тарифе с задержкой 15 минут');
   ok(!('priceUzs' in plan0.data), 'Mini App не получает цен тарифов');
 
-  console.log('\n4. Заявка покупателя');
+  console.log('\n4. Файлы и заявка покупателя');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const pre = await call('POST', '/v1/files', buyer, { fileName: 'maket.png', mime: 'image/png', size: png.length });
+  const put = await fetch(pre.data.uploadUrl, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: png });
+  const doneUp = await call('POST', `/v1/files/${pre.data.id}/complete`, buyer);
+  ok(put.status === 200 && doneUp.data.status === 'ready', 'файл загружен через api по подписанной ссылке');
+  const dl = await call('GET', `/v1/files/${pre.data.id}/url`, buyer);
+  const back = Buffer.from(await (await fetch(dl.data.url)).arrayBuffer());
+  ok(back.equals(png), 'файл скачивается обратно без изменений');
+  const foreign = await call('GET', `/v1/files/${pre.data.id}/url`, suppliers[5].token);
+  ok(foreign.status === 404, 'чужой файл недоступен');
   const draft = await call('POST', '/v1/requests/parse', buyer, { text: 'Нужны визитки 1000 шт 90х50, двусторонние, ламинация, Чиланзар' });
   ok(draft.status === 201 && draft.data.status === 'draft', 'черновик создан');
   const reqId = draft.data.id;

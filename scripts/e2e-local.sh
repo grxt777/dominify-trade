@@ -9,6 +9,7 @@ PG_ADMIN_URL="${PG_ADMIN_URL:-postgres://postgres:postgres@localhost:5432/postgr
 export DATABASE_URL="${PG_ADMIN_URL%/*}/${DB_NAME}"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379/15}"
 export NODE_ENV=test PORT="${PORT:-3100}" API_URL="http://localhost:${PORT:-3100}"
+export PUBLIC_API_URL="$API_URL"
 export BOT_TOKEN="123456:TEST-e2e-token-not-real"
 export JWT_SECRET="e2e-jwt-secret-please-change-0123456789abcdef"
 export ENCRYPTION_KEY="$(node -e 'console.log(Buffer.alloc(32,7).toString("base64"))')"

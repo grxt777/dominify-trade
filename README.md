@@ -103,7 +103,11 @@ LLM_PROVIDER=gemini          # или anthropic
 GEMINI_API_KEY=...           # ключ из Google AI Studio
 ANTHROPIC_API_KEY=...        # если выбран anthropic
 STORAGE_DRIVER=s3
-S3_ENDPOINT / S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY — из бакета
+S3_ENDPOINT=${{Bucket.ENDPOINT}}
+S3_BUCKET=${{Bucket.BUCKET}}
+S3_REGION=${{Bucket.REGION}}
+S3_ACCESS_KEY_ID=${{Bucket.ACCESS_KEY_ID}}
+S3_SECRET_ACCESS_KEY=${{Bucket.SECRET_ACCESS_KEY}}
 ```
 
 В окружении `staging` — токен тестового бота, `NOTIFY_DRIVER=telegram` и песочницы платёжек.

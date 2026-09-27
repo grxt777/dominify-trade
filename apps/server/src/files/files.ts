@@ -3,7 +3,6 @@ import { chats, files, memberships, messages, offers, requestFiles, staff, type 
 import { uploadRequestSchema, type UploadRequestDto } from '@dominify/shared';
 import { and, eq, or, sql } from 'drizzle-orm';
 import type { Request, Response } from 'express';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomToken } from '../common/crypto';
 import { AppError, forbidden, notFound, ZodPipe } from '../common/http';
@@ -108,7 +107,7 @@ export class FilesController {
     return { url: await this.storage.downloadUrl(f.key), mime: f.mime, fileName: f.fileName };
   }
 
-  // ── Локальный драйвер хранилища: подписанные PUT и GET. На Railway вместо этого работает бакет. ──
+  // ── Загрузка и отдача файлов через api по подписанной ссылке (локальный диск или бакет). ──
 
   @Public()
   @Put('local/*key')
@@ -122,9 +121,9 @@ export class FilesController {
       if (size > 20 * 1024 * 1024) throw new AppError('too_large', 'Файл больше 20 МБ');
       chunks.push(chunk as Buffer);
     }
-    const full = this.storage.localPath(key);
-    await mkdir(path.dirname(full), { recursive: true });
-    await writeFile(full, Buffer.concat(chunks));
+    const ext = path.extname(key).slice(1);
+    const mime = Object.entries(EXT).find(([, e]) => e === ext)?.[0] ?? 'application/octet-stream';
+    await this.storage.put(key, Buffer.concat(chunks), mime);
     res.status(200).json({ ok: true });
   }
 
@@ -134,7 +133,7 @@ export class FilesController {
     const key = decodeURIComponent(req.path.replace(/^\/v1\/files\/local\//, ''));
     if (q.op !== 'get' || !this.storage.verifyLocalSig(key, 'get', Number(q.exp), q.sig ?? '')) throw forbidden('Ссылка недействительна');
     try {
-      const buf = await readFile(this.storage.localPath(key));
+      const buf = await this.storage.get(key);
       const ext = path.extname(key).slice(1);
       const mime = Object.entries(EXT).find(([, e]) => e === ext)?.[0] ?? 'application/octet-stream';
       res.type(mime).send(buf);

@@ -17,7 +17,7 @@ const schema = z.object({
 
   // Telegram
   BOT_TOKEN: z.string().min(10),
-  BOT_USERNAME: z.string().default('dominify_bot'),
+  BOT_USERNAME: z.string().default('leetvertexbot'),
   /** Короткое имя Mini App в BotFather: ссылка t.me/<бот>/<имя>?startapp=... */
   MINIAPP_SHORT_NAME: z.string().default('app'),
   BOT_WEBHOOK_SECRET: z.string().default(''),
@@ -46,7 +46,8 @@ const schema = z.object({
   LLM_MODEL_SMART: z.string().default('claude-sonnet-5'),
   GEMINI_API_KEY: z.string().default(''),
   GEMINI_MODEL_FAST: z.string().default('gemini-3.8-flash'),
-  GEMINI_MODEL_SMART: z.string().default('gemini-3.1-pro-preview'),
+  // Для экономии и фото, и сложные заявки тоже идут в Flash. Pro включается переменной, если качества не хватит.
+  GEMINI_MODEL_SMART: z.string().default('gemini-3.8-flash'),
   LLM_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.7),
   AI_DAILY_PARSE_LIMIT_PER_USER: z.coerce.number().default(40),
   STT_API_URL: z.string().default(''),
@@ -61,6 +62,8 @@ const schema = z.object({
   S3_BUCKET: z.string().default(''),
   S3_ACCESS_KEY_ID: z.string().default(''),
   S3_SECRET_ACCESS_KEY: z.string().default(''),
+  /** Новые бакеты Railway работают с virtual-hosted адресами; path-style нужен только старым. */
+  S3_FORCE_PATH_STYLE: bool.default(false),
 
   // Платежи (веб-страница оплаты счёта, не Mini App)
   PAYME_MERCHANT_ID: z.string().default(''),
