@@ -40,10 +40,13 @@ const schema = z.object({
   DEV_AUTH: bool.default(false),
 
   // ИИ
-  LLM_PROVIDER: z.enum(['anthropic', 'rules']).default('rules'),
+  LLM_PROVIDER: z.enum(['anthropic', 'gemini', 'rules']).default('rules'),
   ANTHROPIC_API_KEY: z.string().default(''),
   LLM_MODEL_FAST: z.string().default('claude-haiku-4-5'),
   LLM_MODEL_SMART: z.string().default('claude-sonnet-5'),
+  GEMINI_API_KEY: z.string().default(''),
+  GEMINI_MODEL_FAST: z.string().default('gemini-3.8-flash'),
+  GEMINI_MODEL_SMART: z.string().default('gemini-3.1-pro-preview'),
   LLM_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.7),
   AI_DAILY_PARSE_LIMIT_PER_USER: z.coerce.number().default(40),
   STT_API_URL: z.string().default(''),

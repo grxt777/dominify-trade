@@ -53,6 +53,31 @@ function catalogPrompt(catalog: CatalogEntry[]): string {
   return lines.join('\n');
 }
 
+/** Системный промпт разбора: общий для Claude и Gemini. */
+export function buildSystemPrompt(catalog: CatalogEntry[], regions: string[], today: string): string {
+  return [
+    'Ты разбираешь B2B-заявки на полиграфию и наружную рекламу в Узбекистане.',
+    'Пишут на русском, узбекском (латиница или кириллица) или смеси, часто коротко и с ошибками.',
+    'Выбери одну листовую категорию из каталога, заполни поля шаблона по key, остальное оставь null.',
+    'Поля со звёздочкой обязательны: если их нет в тексте, перечисли их в missingFields и задай один короткий вопрос о самом важном.',
+    'Ничего не выдумывай. Если заявка не про наши категории, верни categorySlug null и низкую уверенность.',
+    `Сегодня ${today}. Часовой пояс Ташкента.`,
+    '',
+    'Каталог:',
+    catalogPrompt(catalog),
+    '',
+    `Регионы: ${regions.join(', ')}`,
+  ].join('\n');
+}
+
+/** Текст пользователя с уточнениями. */
+export function buildUserText(text: string, answers: { q: string; a: string }[]): string {
+  return [
+    `Заявка: ${text || '(только вложения)'}`,
+    ...answers.map((x) => `Уточнение. Вопрос: ${x.q}\nОтвет: ${x.a}`),
+  ].join('\n\n');
+}
+
 /**
  * Разбор через Claude Messages API с принудительным вызовом инструмента.
  * Текст уже очищен от телефонов и ИНН (maskPII).
@@ -68,24 +93,9 @@ export async function anthropicParse(opts: {
   today: string;
   timeoutMs?: number;
 }): Promise<LlmCallResult> {
-  const system = [
-    'Ты разбираешь B2B-заявки на полиграфию и наружную рекламу в Узбекистане.',
-    'Пишут на русском, узбекском (латиница или кириллица) или смеси, часто коротко и с ошибками.',
-    'Выбери одну листовую категорию из каталога, заполни поля шаблона по key, остальное оставь null.',
-    'Поля со звёздочкой обязательны: если их нет в тексте, перечисли их в missingFields и задай один короткий вопрос о самом важном.',
-    'Ничего не выдумывай. Если заявка не про наши категории, верни categorySlug null и низкую уверенность.',
-    `Сегодня ${opts.today}. Часовой пояс Ташкента.`,
-    '',
-    'Каталог:',
-    catalogPrompt(opts.catalog),
-    '',
-    `Регионы: ${opts.regions.join(', ')}`,
-  ].join('\n');
+  const system = buildSystemPrompt(opts.catalog, opts.regions, opts.today);
 
-  const userText = [
-    `Заявка: ${opts.text || '(только вложения)'}`,
-    ...opts.answers.map((x) => `Уточнение. Вопрос: ${x.q}\nОтвет: ${x.a}`),
-  ].join('\n\n');
+  const userText = buildUserText(opts.text, opts.answers);
 
   const content: unknown[] = opts.images.map((img) => ({
     type: 'image',

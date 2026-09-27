@@ -3,13 +3,23 @@ import { aiUsage, files, requestFiles, requests, type Db } from '@dominify/db';
 import { maskPII } from './text';
 import { CatalogService } from '../catalog/catalog';
 import { rulesParse, questionNoCategory, type CatalogEntry } from './rules-parser';
-import { anthropicParse, type LlmImage } from './anthropic';
+import { anthropicParse, type LlmCallResult, type LlmImage } from './anthropic';
+import { geminiParse } from './gemini';
 import { transcribe } from './stt';
 import { missingRequired, REGIONS, type ParseResult } from '@dominify/shared';
 import { and, eq, gt, ne, sql } from 'drizzle-orm';
 import type { Config } from '../config';
 import { StorageService } from '../infra/storage';
 import { CONFIG, DB } from '../infra/tokens';
+
+type LlmArgs = {
+  text: string;
+  answers: { q: string; a: string }[];
+  catalog: CatalogEntry[];
+  regions: string[];
+  images: LlmImage[];
+  today: string;
+};
 
 export interface ParseOutcome {
   status: 'draft' | 'needs_info';
@@ -49,10 +59,10 @@ export class ParsingService {
     const fullText = [req.rawText, ...req.answers.map((x) => x.a)].filter(Boolean).join('\n');
     let result: ParseResult;
 
-    if (this.cfg.LLM_PROVIDER === 'anthropic' && this.cfg.ANTHROPIC_API_KEY) {
+    const llm = this.llm();
+    if (llm) {
       const images = await this.images(requestId);
       const args = {
-        apiKey: this.cfg.ANTHROPIC_API_KEY,
         text: maskPII(req.rawText),
         answers: req.answers.map((x) => ({ q: x.q, a: maskPII(x.a) })),
         catalog,
@@ -61,17 +71,18 @@ export class ParsingService {
         today: new Date().toISOString().slice(0, 10),
       };
       try {
+        // Фото и макеты — сразу сильной модели; текст — быстрой, а при низкой уверенности повторяем сильной.
         const useSmart = images.length > 0;
-        let call = await anthropicParse({ ...args, model: useSmart ? this.cfg.LLM_MODEL_SMART : this.cfg.LLM_MODEL_FAST });
+        let call = await llm.call(args, useSmart ? llm.smart : llm.fast);
         await this.usage(requestId, call.model, call.inputTokens, call.outputTokens, true);
         if (!useSmart && call.result.confidence < this.cfg.LLM_CONFIDENCE_THRESHOLD) {
-          call = await anthropicParse({ ...args, model: this.cfg.LLM_MODEL_SMART });
+          call = await llm.call(args, llm.smart);
           await this.usage(requestId, call.model, call.inputTokens, call.outputTokens, true);
         }
         result = call.result;
       } catch (e) {
         this.log.warn(`ИИ недоступен для заявки ${requestId}, разбираю правилами: ${(e as Error).message}`);
-        await this.usage(requestId, this.cfg.LLM_MODEL_FAST, 0, 0, false);
+        await this.usage(requestId, llm.fast, 0, 0, false);
         result = rulesParse(fullText, catalog);
       }
     } else {
@@ -125,6 +136,25 @@ export class ParsingService {
       .where(eq(requests.id, requestId));
 
     return { status, result, duplicateOf };
+  }
+
+  /** Настроенный провайдер ИИ: Claude, Gemini или null (разбор правилами). */
+  private llm(): { fast: string; smart: string; call: (a: LlmArgs, model: string) => Promise<LlmCallResult> } | null {
+    if (this.cfg.LLM_PROVIDER === 'anthropic' && this.cfg.ANTHROPIC_API_KEY) {
+      return {
+        fast: this.cfg.LLM_MODEL_FAST,
+        smart: this.cfg.LLM_MODEL_SMART,
+        call: (a, model) => anthropicParse({ ...a, apiKey: this.cfg.ANTHROPIC_API_KEY, model }),
+      };
+    }
+    if (this.cfg.LLM_PROVIDER === 'gemini' && this.cfg.GEMINI_API_KEY) {
+      return {
+        fast: this.cfg.GEMINI_MODEL_FAST,
+        smart: this.cfg.GEMINI_MODEL_SMART,
+        call: (a, model) => geminiParse({ ...a, apiKey: this.cfg.GEMINI_API_KEY, model }),
+      };
+    }
+    return null;
   }
 
   /** Похожая заявка того же автора за сутки: сходство триграмм выше 0.8. */
