@@ -1,0 +1,110 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { get, post, type ChatItem, type Message } from '../api';
+import { useT } from '../i18n';
+import { useSession } from '../session';
+import { useSocketEvent } from '../socket';
+import { BackButton, Empty, fmtDate, fmtTime, Section, Spinner } from '../ui';
+
+export function ChatsList() {
+  const t = useT();
+  const nav = useNavigate();
+  const { me } = useSession();
+  const q = useQuery({ queryKey: ['chats'], queryFn: () => get<ChatItem[]>('/v1/chats') });
+  useSocketEvent('message.created', () => q.refetch());
+  return (
+    <Section title={t('tabChats')} body={false}>
+      {q.isLoading && <Spinner />}
+      {q.data?.length === 0 && <Empty>{t('noChats')}</Empty>}
+      {q.data?.map((c) => (
+        <div key={c.id} className="cell" onClick={() => nav(`/chats/${c.id}`)}>
+          <div className="cell-main">
+            <div className="cell-title">{c.buyerUserId === me.id ? c.supplierName : c.buyerName ?? t('buyer')}</div>
+            <div className="cell-sub">{c.title || `#${c.requestId}`}</div>
+          </div>
+          <div className="cell-right">
+            {c.unread > 0 ? <span className="badge">{c.unread}</span> : c.lastMessageAt ? fmtDate(c.lastMessageAt, t.lang) : null}
+          </div>
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+export function ChatPage() {
+  const { id } = useParams();
+  const chatId = Number(id);
+  const t = useT();
+  const nav = useNavigate();
+  const { me } = useSession();
+  const qc = useQueryClient();
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const bottom = useRef<HTMLDivElement>(null);
+
+  const q = useQuery({
+    queryKey: ['chat', chatId],
+    queryFn: () => get<{ side: string; chat: { requestId: number }; messages: Message[] }>(`/v1/chats/${chatId}/messages`),
+  });
+  useSocketEvent(
+    'message.created',
+    (m: Message) => {
+      if (m.chatId !== chatId) return;
+      qc.setQueryData(['chat', chatId], (old: typeof q.data) => (old && !old.messages.some((x) => x.id === m.id) ? { ...old, messages: [...old.messages, m] } : old));
+    },
+    `chat:${chatId}`,
+  );
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' });
+    qc.invalidateQueries({ queryKey: ['chats'] });
+  }, [q.data?.messages.length, qc]);
+
+  const send = async () => {
+    const body = text.trim();
+    if (!body) return;
+    setSending(true);
+    try {
+      const m = await post<Message>(`/v1/chats/${chatId}/messages`, { text: body });
+      setText('');
+      qc.setQueryData(['chat', chatId], (old: typeof q.data) => (old && !old.messages.some((x) => x.id === m.id) ? { ...old, messages: [...old.messages, m] } : old));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <>
+      <BackButton to="/chats" />
+      {q.data && (
+        <button className="btn ghost" onClick={() => nav(`/requests/${q.data!.chat.requestId}`)}>
+          #{q.data.chat.requestId} ›
+        </button>
+      )}
+      {q.isLoading && <Spinner />}
+      <div className="chat">
+        {q.data?.messages.map((m) => (
+          <div key={m.id} className={`msg ${m.senderUserId === me.id ? 'mine' : ''}`}>
+            {m.text ?? '📎'}
+            <time>{fmtTime(m.createdAt, t.lang)}</time>
+          </div>
+        ))}
+        <div ref={bottom} />
+      </div>
+      <div className="composer">
+        <input
+          className="input"
+          placeholder={t('messagePlaceholder')}
+          value={text}
+          maxLength={4000}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && send()}
+        />
+        <button className="btn" disabled={sending || !text.trim()} onClick={send} aria-label={t('send')}>
+          ➤
+        </button>
+      </div>
+    </>
+  );
+}

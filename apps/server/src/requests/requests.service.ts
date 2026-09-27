@@ -157,6 +157,8 @@ export class RequestsService {
         fields,
         regionCode: dto.regionCode ?? req.regionCode ?? 'tashkent',
         title: dto.title ?? req.title ?? cat.name.ru,
+        deadline: dto.deadline !== undefined ? dto.deadline : req.deadline,
+        budgetUzs: dto.budgetUzs !== undefined ? dto.budgetUzs : req.budgetUzs,
         quantity: typeof fields.quantity === 'number' ? fields.quantity : req.quantity,
         missingFields: [],
         question: null,

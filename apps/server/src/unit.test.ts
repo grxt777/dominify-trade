@@ -188,4 +188,10 @@ describe('разбор правилами', () => {
     expect(r.categorySlug).toBe('print.flyers');
     expect(r.missingFields).toEqual(['format']);
   });
+
+  it('варианты select по корню слова', () => {
+    const r = rulesParse('листовки А5 2000 шт двусторонние', flat, now);
+    expect(r.fields.sides).toBe('4+4');
+    expect(r.fields.format).toBe('A5');
+  });
 });

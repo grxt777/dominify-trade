@@ -36,6 +36,7 @@ export class ChatService {
         id: chats.id,
         requestId: chats.requestId,
         title: requests.title,
+        supplierCompanyId: chats.supplierCompanyId,
         supplierName: companies.name,
         buyerName: users.firstName,
         buyerUserId: chats.buyerUserId,

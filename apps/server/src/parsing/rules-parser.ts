@@ -75,7 +75,12 @@ export function rulesParse(text: string, catalog: CatalogEntry[], now = new Date
   // Значения select-полей по подписям вариантов.
   for (const fd of fields) {
     if (fd.type !== 'select' || values[fd.key] !== undefined || !fd.options) continue;
-    const hit = fd.options.find((o) => [o.label.ru, o.label.uz].some((l) => l.length >= 3 && t.includes(l.toLowerCase().slice(0, Math.max(4, l.length - 2)))));
+    // Совпадение по корню первого слова подписи: «Двусторонняя цветная» ловит «двусторонние».
+    const root = (l: string) => {
+      const w = l.toLowerCase().split(/[\s(]/)[0];
+      return w.length > 6 ? w.slice(0, w.length - 2) : w;
+    };
+    const hit = fd.options.find((o) => [o.label.ru, o.label.uz].some((l) => root(l).length >= 3 && t.includes(root(l))));
     if (hit) values[fd.key] = hit.value;
   }
   if (/ламинац|laminats/.test(t)) values.lamination = true;

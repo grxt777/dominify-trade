@@ -49,6 +49,8 @@ export const submitRequestSchema = z.object({
   fields: z.record(z.string(), z.unknown()).optional(),
   regionCode: z.string().max(64).optional(),
   title: z.string().trim().min(3).max(200).optional(),
+  deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  budgetUzs: z.number().int().positive().max(100_000_000_000).nullable().optional(),
 });
 export type SubmitRequestDto = z.infer<typeof submitRequestSchema>;
 
