@@ -1,6 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
 import { useEffect } from 'react';
-import { API_URL, currentToken } from './api';
+import { API_URL, currentToken, login } from './api';
 
 let socket: Socket | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -12,6 +12,22 @@ export function connectSocket(): Socket | null {
   if (socket) return socket;
   socket = io(API_URL, { path: '/ws', transports: ['websocket'], auth: (cb) => cb({ token: currentToken() }) });
   socket.on('connect', () => socket?.emit('ping'));
+  // Сервер закрывает сокет, когда истекает токен. Сам socket.io после этого не переподключается:
+  // получаем новый токен и подключаемся снова.
+  const refresh = async () => {
+    try {
+      await login();
+      socket?.connect();
+    } catch {
+      setTimeout(() => void refresh(), 15_000);
+    }
+  };
+  socket.on('disconnect', (reason) => {
+    if (reason === 'io server disconnect') void refresh();
+  });
+  socket.on('connect_error', (err) => {
+    if (err.message === 'unauthorized') void refresh();
+  });
   pingTimer = setInterval(() => socket?.connected && socket.emit('ping'), 30_000);
   return socket;
 }

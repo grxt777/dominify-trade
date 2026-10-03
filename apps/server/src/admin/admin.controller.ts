@@ -5,6 +5,7 @@ import {
   blacklist,
   categories,
   companies,
+  deals,
   memberships,
   moderationItems,
   offers,
@@ -25,10 +26,12 @@ import { AppError, notFound, ZodPipe } from '../common/http';
 import { CurrentUser, Staff, type AuthUser } from '../auth/guards';
 import { BillingService } from '../billing/billing.service';
 import { CatalogService } from '../catalog/catalog';
-import { DealsService } from '../deals/deals';
+import { DealsService, resolveDealSchema, type ResolveDealDto } from '../deals/deals';
 import { CONFIG, DB } from '../infra/tokens';
 import { MatchingService } from '../matching/matching.service';
 import { RequestsService } from '../requests/requests.service';
+
+const likePattern = (q: string) => `%${q.slice(0, 100).replace(/[\\%_]/g, '\\$&')}%`;
 
 @Controller('admin')
 @Staff()
@@ -124,7 +127,7 @@ export class AdminController {
       .where(
         and(
           status ? eq(requests.status, status) : undefined,
-          q ? or(ilike(requests.rawText, `%${q}%`), ilike(requests.title, `%${q}%`)) : undefined,
+          q ? or(ilike(requests.rawText, likePattern(q)), ilike(requests.title, likePattern(q))) : undefined,
         ),
       )
       .orderBy(desc(requests.createdAt))
@@ -230,7 +233,7 @@ export class AdminController {
       })
       .from(companies)
       .leftJoin(subscriptions, eq(subscriptions.companyId, companies.id))
-      .where(and(q ? ilike(companies.name, `%${q}%`) : undefined, supplier === '1' ? eq(companies.isSupplier, true) : undefined))
+      .where(and(q ? ilike(companies.name, likePattern(q)) : undefined, supplier === '1' ? eq(companies.isSupplier, true) : undefined))
       .orderBy(desc(companies.createdAt))
       .limit(300);
   }
@@ -344,6 +347,107 @@ export class AdminController {
     return { ok: true };
   }
 
+  /** Отзывы с признаками накрутки (и любые другие при flagged=0). */
+  @Get('reviews')
+  listReviews(@Query('flagged') flagged = '1') {
+    return this.db
+      .select({
+        id: reviews.id,
+        dealId: reviews.dealId,
+        authorSide: reviews.authorSide,
+        author: users.firstName,
+        targetCompanyId: reviews.targetCompanyId,
+        targetName: companies.name,
+        stars: reviews.stars,
+        text: reviews.text,
+        counted: reviews.counted,
+        hidden: reviews.hidden,
+        flag: reviews.flag,
+        createdAt: reviews.createdAt,
+      })
+      .from(reviews)
+      .innerJoin(users, eq(users.id, reviews.authorUserId))
+      .leftJoin(companies, eq(companies.id, reviews.targetCompanyId))
+      .where(flagged === '1' ? sql`${reviews.flag} is not null` : undefined)
+      .orderBy(desc(reviews.createdAt))
+      .limit(200);
+  }
+
+  /** Модератор проверил отзыв: учитывать в рейтинге или нет. */
+  @Post('reviews/:id/counted')
+  @HttpCode(HttpStatus.OK)
+  async setReviewCounted(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Body(new ZodPipe(z.object({ counted: z.boolean() }))) b: { counted: boolean }) {
+    const [r] = await this.db.update(reviews).set({ counted: b.counted }).where(eq(reviews.id, id)).returning();
+    if (!r) throw notFound('Отзыв');
+    if (r.targetCompanyId) await this.deals.recomputeRating(r.targetCompanyId);
+    await this.db
+      .update(moderationItems)
+      .set({ status: 'resolved', resolution: b.counted ? 'counted' : 'not_counted', resolvedByUserId: u.id, resolvedAt: new Date() })
+      .where(and(eq(moderationItems.refType, 'review'), eq(moderationItems.refId, id), eq(moderationItems.status, 'open')));
+    await this.audit(u, 'review.counted', 'review', id, b);
+    return { ok: true };
+  }
+
+  // ── Сделки и споры ──
+
+  @Get('deals')
+  listDeals(@Query('status') status = 'disputed') {
+    return this.db
+      .select({
+        id: deals.id,
+        requestId: deals.requestId,
+        title: requests.title,
+        status: deals.status,
+        paymentStatus: deals.paymentStatus,
+        amountUzs: deals.amountUzs,
+        supplierCompanyId: deals.supplierCompanyId,
+        supplierName: companies.name,
+        buyer: users.firstName,
+        buyerConfirmed: sql<boolean>`${deals.buyerConfirmedAt} is not null`,
+        supplierConfirmed: sql<boolean>`${deals.supplierConfirmedAt} is not null`,
+        closedBy: deals.closedBy,
+        closeReason: deals.closeReason,
+        disputedAt: deals.disputedAt,
+        createdAt: deals.createdAt,
+      })
+      .from(deals)
+      .innerJoin(requests, eq(requests.id, deals.requestId))
+      .innerJoin(companies, eq(companies.id, deals.supplierCompanyId))
+      .innerJoin(users, eq(users.id, deals.buyerUserId))
+      .where(status === 'all' ? undefined : eq(deals.status, status))
+      .orderBy(desc(deals.createdAt))
+      .limit(200);
+  }
+
+  @Post('deals/:id/resolve')
+  @HttpCode(HttpStatus.OK)
+  @Staff('admin', 'moderator')
+  resolveDeal(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Body(new ZodPipe(resolveDealSchema)) b: ResolveDealDto) {
+    return this.deals.resolve(u.id, id, b);
+  }
+
+  // ── Безопасная сделка: выплаты исполнителям и возвраты покупателям ──
+
+  @Get('escrow')
+  escrow(@Query('status') status = 'payout_due') {
+    const allowed = ['awaiting', 'held', 'payout_due', 'refund_due', 'paid_out', 'refunded', 'all'];
+    return this.deals.escrowList(allowed.includes(status) ? status : 'payout_due');
+  }
+
+  @Post('escrow/:id/payout')
+  @HttpCode(HttpStatus.OK)
+  @Staff('admin')
+  payout(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.deals.settle(u.id, id, 'payout');
+  }
+
+  @Post('escrow/:id/refund')
+  @HttpCode(HttpStatus.OK)
+  @Staff('admin')
+  refund(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.deals.settle(u.id, id, 'refund');
+  }
+
   @Get('categories')
   categoriesTree() {
     return this.catalog.tree();
@@ -357,7 +461,10 @@ export class AdminController {
     @Body(new ZodPipe(z.object({ active: z.boolean().optional(), keywords: z.string().max(2000).optional(), fields: z.array(z.any()).optional() })))
     b: { active?: boolean; keywords?: string; fields?: unknown[] },
   ) {
-    await this.db.update(categories).set(b as Partial<typeof categories.$inferInsert>).where(eq(categories.id, id));
+    await this.db
+      .update(categories)
+      .set({ ...(b as Partial<typeof categories.$inferInsert>), editedAt: new Date() })
+      .where(eq(categories.id, id));
     this.catalog.invalidate();
     await this.audit(u, 'category.patch', 'category', id, b);
     return { ok: true };

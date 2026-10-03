@@ -23,7 +23,7 @@ import {
   type Lang,
   type PlanCode,
 } from '@dominify/shared';
-import { and, eq, inArray, ne, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import type { Config } from '../config';
 import { CatalogService } from '../catalog/catalog';
 import { Analytics } from '../infra/infra.module';
@@ -81,6 +81,8 @@ export class MatchingService {
         and(
           eq(companies.isSupplier, true),
           eq(companies.blocked, false),
+          // Демо-витрина не должна забирать настоящие заявки у живых исполнителей.
+          this.cfg.NODE_ENV === 'production' ? eq(companies.isDemo, false) : undefined,
           inArray(supplierCategories.categoryId, catIds),
           authorCompanies.length ? notInArray(companies.id, authorCompanies) : undefined,
         ),
@@ -130,7 +132,10 @@ export class MatchingService {
   async dispatch(requestId: number, wave: number): Promise<number> {
     const [req] = await this.db.select().from(requests).where(eq(requests.id, requestId));
     if (!req || !(OPEN_REQUEST_STATUSES as string[]).includes(req.status)) return 0;
-    if (req.wave >= wave) return 0; // волна уже была: повтор задачи не шлёт дубли
+    if (req.wave >= wave) {
+      // Волна уже записана. Если прошлая попытка упала посреди уведомлений, досылаем недоставленным — без дублей.
+      return this.resumeDeliveries(req, wave);
+    }
 
     const sent = await this.db
       .select({ id: requestDeliveries.supplierCompanyId })
@@ -138,23 +143,59 @@ export class MatchingService {
       .where(eq(requestDeliveries.requestId, requestId));
     const { candidates, delays } = await this.candidates(requestId);
     const size = wave === 1 ? DEFAULT_WAVES.wave1Size : DEFAULT_WAVES.wave2Size;
-    const picked = pickWave(candidates, new Set(sent.map((s) => s.id)), size, new Date());
+    const exclude = new Set(sent.map((s) => s.id));
+    // Заказ с витрины: выбранный исполнитель получает заявку первым и без задержки тарифа,
+    // остальные места волны — для сравнения цен.
+    const preferred = wave === 1 && req.preferredCompanyId && !exclude.has(req.preferredCompanyId) ? await this.preferredOf(req) : null;
+    if (preferred) exclude.add(preferred);
+    const picked = pickWave(candidates, exclude, preferred ? size - 1 : size, new Date());
 
     const nextStatus = req.status === 'has_offers' ? 'has_offers' : wave === 1 ? 'wave_1' : 'wave_2';
-    await this.db.update(requests).set({ wave, status: nextStatus, updatedAt: new Date() }).where(eq(requests.id, requestId));
+    const list = picked.map((p) => ({ companyId: p.companyId, score: p.score, delayMin: delays.get(p.companyId) ?? 0 }));
+    if (preferred) list.unshift({ companyId: preferred, score: 1, delayMin: 0 });
+    // Номер волны и записи о рассылке пишутся вместе: падение между ними не оставит волну «пустой».
+    const inserted = await this.db.transaction(async (tx) => {
+      const [upd] = await tx
+        .update(requests)
+        .set({ wave, status: nextStatus, updatedAt: new Date() })
+        .where(and(eq(requests.id, requestId), sql`${requests.wave} < ${wave}`))
+        .returning({ id: requests.id });
+      if (!upd) return null;
+      return list.length ? this.insertDeliveries(tx, requestId, list, wave, false) : [];
+    });
+    if (inserted === null) return this.resumeDeliveries(req, wave);
 
-    if (!picked.length) {
+    if (!list.length) {
       if (wave === 1 || sent.length === 0) await this.toManual(requestId, 'request_no_suppliers', 'Нет подходящих поставщиков');
       this.log.log(`Заявка ${requestId}: волна ${wave} пустая`);
       return 0;
     }
 
-    await this.deliver(req, picked.map((p) => ({ companyId: p.companyId, score: p.score, delayMin: delays.get(p.companyId) ?? 0 })), wave, false);
+    await this.notifyDeliveries(req, inserted);
+    await this.scheduleFollowUp(requestId, wave);
+    this.analytics.track('request.dispatched', null, { requestId, wave, count: list.length, preferred: !!preferred });
+    return list.length;
+  }
 
+  /** Исполнитель, у которого заказали услугу: если он всё ещё может принять заявку. */
+  private async preferredOf(req: typeof requests.$inferSelect): Promise<number | null> {
+    if (!req.preferredCompanyId) return null;
+    const [c] = await this.db
+      .select({ id: companies.id })
+      .from(companies)
+      .where(and(eq(companies.id, req.preferredCompanyId), eq(companies.isSupplier, true), eq(companies.blocked, false)));
+    if (!c) return null;
+    const [own] = await this.db
+      .select({ id: memberships.companyId })
+      .from(memberships)
+      .where(and(eq(memberships.companyId, c.id), eq(memberships.userId, req.authorUserId)));
+    return own ? null : c.id;
+  }
+
+  /** Проверка после волны. jobId фиксированный, поэтому повторный вызов при досылке не создаёт вторую задачу. */
+  private async scheduleFollowUp(requestId: number, wave: number) {
     if (wave === 1) await this.queues.checkWave({ requestId }, this.cfg.WAVE1_WAIT_MIN * 60_000);
     else await this.queues.queues.matching.add('check-final', { requestId }, { jobId: `final-${requestId}`, delay: this.cfg.WAVE1_WAIT_MIN * 60_000 });
-    this.analytics.track('request.dispatched', null, { requestId, wave, count: picked.length });
-    return picked.length;
   }
 
   /** Записи о рассылке и уведомления поставщикам. */
@@ -164,12 +205,24 @@ export class MatchingService {
     wave: number,
     manual: boolean,
   ) {
+    const inserted = await this.insertDeliveries(this.db, req.id, list, wave, manual);
+    return this.notifyDeliveries(req, inserted);
+  }
+
+  private insertDeliveries(
+    tx: Pick<Db, 'insert'>,
+    requestId: number,
+    list: { companyId: number; score: number; delayMin: number }[],
+    wave: number,
+    manual: boolean,
+  ) {
+    if (!list.length) return Promise.resolve([] as (typeof requestDeliveries.$inferSelect)[]);
     const now = Date.now();
-    const inserted = await this.db
+    return tx
       .insert(requestDeliveries)
       .values(
         list.map((p) => ({
-          requestId: req.id,
+          requestId,
           supplierCompanyId: p.companyId,
           wave,
           score: p.score,
@@ -179,7 +232,23 @@ export class MatchingService {
       )
       .onConflictDoNothing()
       .returning();
+  }
 
+  private async resumeDeliveries(req: typeof requests.$inferSelect, wave: number): Promise<number> {
+    const pending = await this.db
+      .select()
+      .from(requestDeliveries)
+      .where(and(eq(requestDeliveries.requestId, req.id), eq(requestDeliveries.wave, wave), isNull(requestDeliveries.sentAt)));
+    if (!pending.length) return 0;
+    this.log.warn(`Заявка ${req.id}: досылаем волну ${wave} (${pending.length})`);
+    const n = await this.notifyDeliveries(req, pending);
+    await this.scheduleFollowUp(req.id, wave);
+    return n;
+  }
+
+  /** Уведомления по записям рассылки. Отметка sentAt ставится после каждой компании: повтор не шлёт дубли. */
+  private async notifyDeliveries(req: typeof requests.$inferSelect, inserted: (typeof requestDeliveries.$inferSelect)[]) {
+    const now = Date.now();
     const defs = req.categoryId ? await this.catalog.fieldsFor(req.categoryId) : [];
     for (const d of inserted) {
       const members = await this.db.select({ userId: memberships.userId }).from(memberships).where(eq(memberships.companyId, d.supplierCompanyId));
@@ -189,7 +258,7 @@ export class MatchingService {
           m.userId,
           'new_request',
           { requestId: req.id, title: req.title, summary: summarize(req, defs, lang), deliveryId: d.id },
-          { delayMs: d.notifyAt.getTime() - now },
+          { delayMs: Math.max(0, d.notifyAt.getTime() - now) },
         );
       }
       await this.db.update(requestDeliveries).set({ sentAt: new Date() }).where(eq(requestDeliveries.id, d.id));

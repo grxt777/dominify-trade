@@ -7,6 +7,7 @@ import IORedis from 'ioredis';
 import type { Config } from '../config';
 import { AppError } from '../common/http';
 import { FilesService } from '../files/files';
+import { captureException } from '../infra/monitoring';
 import { ParsingService } from '../parsing/parsing.service';
 import { RequestsService } from '../requests/requests.service';
 import { UsersService } from '../users/users.service';
@@ -46,7 +47,21 @@ const TXT = {
   submitted: { ru: 'Отправлено поставщикам ✅', uz: 'Yetkazib beruvchilarga yuborildi ✅', uzc: 'Етказиб берувчиларга юборилди ✅' },
   error: { ru: 'Что-то пошло не так. Попробуйте ещё раз чуть позже.', uz: "Nimadir xato ketdi. Birozdan keyin qayta urinib ko'ring.", uzc: 'Нимадир хато кетди. Бироздан кейин қайта уриниб кўринг.' },
   tooLarge: { ru: 'Файл больше 20 МБ, пришлите поменьше.', uz: 'Fayl 20 MB dan katta.', uzc: 'Файл 20 MB дан катта.' },
+  voiceTooLong: {
+    ru: 'Голосовое длиннее 3 минут. Запишите короче или напишите текстом.',
+    uz: "Ovozli xabar 3 daqiqadan uzun. Qisqaroq yozib yuboring yoki matn bilan yozing.",
+    uzc: 'Овозли хабар 3 дақиқадан узун. Қисқароқ ёзиб юборинг ёки матн билан ёзинг.',
+  },
+  slowDown: {
+    ru: 'Слишком много сообщений подряд. Подождите минуту и продолжайте.',
+    uz: "Juda ko'p xabar yuborildi. Bir daqiqa kutib, davom eting.",
+    uzc: 'Жуда кўп хабар юборилди. Бир дақиқа кутиб, давом этинг.',
+  },
 };
+
+/** Сколько ждать остальные фото альбома, прежде чем разбирать заявку. */
+const ALBUM_WAIT_MS = 4_000;
+const MAX_VOICE_SEC = 180;
 
 const MIME_OK = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
 
@@ -66,6 +81,54 @@ export function createBot(d: BotDeps): Bot {
   };
 
   const openKb = (lang: Lang, route = 'home') => new InlineKeyboard().webApp(TXT.open[lang], miniApp(route));
+  const errText = (e: unknown, lang: Lang) =>
+    e instanceof AppError ? ((e.getResponse() as { message?: string }).message ?? TXT.error[lang]) : TXT.error[lang];
+
+  /** Заблокированных молча игнорируем; результат кэшируется на минуту, чтобы не ходить в базу на каждое сообщение. */
+  const isBlocked = async (telegramId: number): Promise<boolean> => {
+    const key = `blk:${telegramId}`;
+    const cached = await d.redis.get(key);
+    if (cached !== null) return cached === '1';
+    const [u] = await d.db.select({ phoneHash: users.phoneHash }).from(users).where(eq(users.telegramId, telegramId));
+    const blocked = await d.users.isUserBlocked({ telegramId, phoneHash: u?.phoneHash ?? null });
+    await d.redis.set(key, blocked ? '1' : '0', 'EX', 60);
+    return blocked;
+  };
+
+  /**
+   * Каждое сообщение может стоить вызова LLM или распознавания речи. Лимит в минуту и в сутки на человека;
+   * фото из уже начатого альбома не считаются отдельными сообщениями.
+   */
+  const overLimit = async (ctx: Context): Promise<boolean> => {
+    const id = ctx.from!.id;
+    const mg = ctx.message?.media_group_id;
+    if (mg && (await d.redis.exists(`mg:${mg}`))) return false;
+    const minute = Math.floor(Date.now() / 60_000);
+    const day = new Date(Date.now() + 5 * 3600_000).toISOString().slice(0, 10);
+    const [[, perMin], [, perDay]] = (await d.redis
+      .multi()
+      .incr(`brl:m:${id}:${minute}`)
+      .expire(`brl:m:${id}:${minute}`, 120)
+      .incr(`brl:d:${id}:${day}`)
+      .expire(`brl:d:${id}:${day}`, 2 * 86_400)
+      .exec()
+      .then((r) => [r![0], r![2]])) as [unknown, number][];
+    return perMin > d.cfg.BOT_MSG_PER_MIN || perDay > d.cfg.BOT_MSG_PER_DAY;
+  };
+
+  bot.use(async (ctx, next) => {
+    if (!ctx.from || ctx.from.is_bot) return;
+    if (ctx.chat && ctx.chat.type !== 'private') return;
+    if (await isBlocked(ctx.from.id)) return;
+    if (ctx.message && !ctx.message.contact && (await overLimit(ctx))) {
+      if (await d.redis.set(`brl:warn:${ctx.from.id}`, '1', 'EX', 60, 'NX')) {
+        const lang = pickLang(ctx.from.language_code) as Lang;
+        await ctx.reply(TXT.slowDown[lang]).catch(() => undefined);
+      }
+      return;
+    }
+    await next();
+  });
 
   bot.command('start', async (ctx) => {
     const { user, lang } = await userOf(ctx);
@@ -74,6 +137,11 @@ export function createBot(d: BotDeps): Bot {
       await ctx.reply(TXT.askPhone[lang], {
         reply_markup: new Keyboard().requestContact(TXT.sharePhone[lang]).resized().oneTime(),
       });
+      return;
+    }
+    if (payload?.startsWith('ref_')) {
+      await d.users.attributeReferral(user.id, payload);
+      await ctx.reply(TXT.welcome[lang], { reply_markup: openKb(lang, 'home') });
       return;
     }
     await ctx.reply(TXT.welcome[lang], { reply_markup: openKb(lang, payload || 'home') });
@@ -113,12 +181,47 @@ export function createBot(d: BotDeps): Bot {
         await d.requests.answer(user.id, Number(awaiting), text);
         await ctx.reply(TXT.answerTaken[lang]);
         return;
-      } catch {
+      } catch (e) {
+        if (e instanceof AppError && ['daily_limit', 'too_many_answers'].includes(e.code)) {
+          await ctx.reply(errText(e, lang), { reply_markup: openKb(lang, `req_${awaiting}`) });
+          return;
+        }
         // Заявка уже отправлена или отменена: считаем сообщение новой заявкой.
       }
     }
-    await d.requests.createDraft(user.id, { text, fileIds }, 'bot');
-    await ctx.reply(TXT.parsing[lang]);
+
+    // Альбом приходит отдельными сообщениями с общим media_group_id: первое создаёт черновик
+    // с отложенным разбором, остальные прикрепляются к нему.
+    // В режиме вебхука фото альбома приходят параллельно, поэтому первое занимает ключ через SET NX.
+    const mg = fileIds.length ? ctx.message?.media_group_id : undefined;
+    if (mg) {
+      const first = await d.redis.set(`mg:${mg}`, 'pending', 'EX', 120, 'NX');
+      if (!first) {
+        const draftId = await waitAlbumDraft(mg);
+        if (draftId) {
+          await d.requests.attachToDraft(user.id, draftId, fileIds, text || undefined).catch((e) => log.warn(`Альбом ${mg}: ${String(e)}`));
+          return;
+        }
+      }
+    }
+    try {
+      const draft = await d.requests.createDraft(user.id, { text, fileIds }, 'bot', mg ? ALBUM_WAIT_MS : 0);
+      if (mg) await d.redis.set(`mg:${mg}`, String(draft.id), 'EX', 120);
+      await ctx.reply(TXT.parsing[lang]);
+    } catch (e) {
+      if (mg) await d.redis.del(`mg:${mg}`);
+      await ctx.reply(errText(e, lang));
+    }
+  };
+
+  const waitAlbumDraft = async (mg: string): Promise<number | null> => {
+    for (let i = 0; i < 30; i++) {
+      const v = await d.redis.get(`mg:${mg}`);
+      if (v === null) return null;
+      if (v !== 'pending') return Number(v);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
   };
 
   bot.on('message:text', async (ctx) => {
@@ -157,6 +260,10 @@ export function createBot(d: BotDeps): Bot {
   bot.on('message:voice', async (ctx) => {
     const { user, lang } = await userOf(ctx);
     const v = ctx.message.voice;
+    if (v.duration > MAX_VOICE_SEC) {
+      await ctx.reply(TXT.voiceTooLong[lang]);
+      return;
+    }
     const buf = await download(v.file_id);
     const text = await d.parsing.speechToText(buf, 'voice.ogg', 'audio/ogg');
     if (!text) {
@@ -178,8 +285,7 @@ export function createBot(d: BotDeps): Bot {
       await ctx.answerCallbackQuery({ text: TXT.submitted[lang] });
       await ctx.editMessageReplyMarkup({ reply_markup: openKb(lang, `req_${id}`) }).catch(() => undefined);
     } catch (e) {
-      const msg = e instanceof AppError ? ((e.getResponse() as { message?: string }).message ?? TXT.error[lang]) : TXT.error[lang];
-      await ctx.answerCallbackQuery({ text: msg.slice(0, 190), show_alert: true });
+      await ctx.answerCallbackQuery({ text: errText(e, lang).slice(0, 190), show_alert: true });
     }
   });
 
@@ -192,6 +298,12 @@ export function createBot(d: BotDeps): Bot {
 
   bot.catch(async (err) => {
     log.error(`Ошибка в апдейте ${err.ctx.update.update_id}: ${err.error instanceof Error ? err.error.message : String(err.error)}`);
+    if (err.error instanceof AppError) {
+      const lang = pickLang(err.ctx.from?.language_code) as Lang;
+      await err.ctx.reply(errText(err.error, lang)).catch(() => undefined);
+      return;
+    }
+    captureException(err.error, { updateId: err.ctx.update.update_id });
     if (err.error instanceof GrammyError) return;
     const lang = pickLang(err.ctx.from?.language_code) as Lang;
     await err.ctx.reply(TXT.error[lang]).catch(() => undefined);

@@ -15,7 +15,7 @@ import {
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/pg-core';
-import type { FieldDef, I18nText } from '@dominify/shared';
+import type { FieldDef, GigPackage, I18nText } from '@dominify/shared';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 const createdAt = () => ts('created_at').notNull().defaultNow();
@@ -23,24 +23,35 @@ const money = (name: string) => bigint(name, { mode: 'number' });
 
 // ───────────────────────── Люди и компании ─────────────────────────
 
-export const users = pgTable('users', {
-  id: serial('id').primaryKey(),
-  telegramId: bigint('telegram_id', { mode: 'number' }).notNull().unique(),
-  firstName: varchar('first_name', { length: 128 }),
-  lastName: varchar('last_name', { length: 128 }),
-  username: varchar('username', { length: 64 }),
-  lang: varchar('lang', { length: 8 }).notNull().default('ru'),
-  phoneEnc: text('phone_enc'),
-  phoneHash: varchar('phone_hash', { length: 64 }),
-  phoneVerifiedAt: ts('phone_verified_at'),
-  activeRole: varchar('active_role', { length: 16 }).notNull().default('buyer'),
-  activeCompanyId: integer('active_company_id'),
-  botStarted: boolean('bot_started').notNull().default(false),
-  botBlocked: boolean('bot_blocked').notNull().default(false),
-  consentAt: ts('consent_at'),
-  lastSeenAt: ts('last_seen_at'),
-  createdAt: createdAt(),
-});
+export const users = pgTable(
+  'users',
+  {
+    id: serial('id').primaryKey(),
+    telegramId: bigint('telegram_id', { mode: 'number' }).notNull().unique(),
+    firstName: varchar('first_name', { length: 128 }),
+    lastName: varchar('last_name', { length: 128 }),
+    username: varchar('username', { length: 64 }),
+    lang: varchar('lang', { length: 8 }).notNull().default('ru'),
+    phoneEnc: text('phone_enc'),
+    phoneHash: varchar('phone_hash', { length: 64 }),
+    phoneVerifiedAt: ts('phone_verified_at'),
+    activeRole: varchar('active_role', { length: 16 }).notNull().default('buyer'),
+    activeCompanyId: integer('active_company_id'),
+    botStarted: boolean('bot_started').notNull().default(false),
+    botBlocked: boolean('bot_blocked').notNull().default(false),
+    consentAt: ts('consent_at'),
+    lastSeenAt: ts('last_seen_at'),
+    /** Аккаунт удалён по просьбе пользователя: персональные данные стёрты, telegram_id освобождён. */
+    deletedAt: ts('deleted_at'),
+    /** Кто пригласил. Бонус пригласившему начисляется один раз — после первой оплаченной и закрытой сделки приглашённого. */
+    referredByUserId: integer('referred_by_user_id'),
+    referralRewardedAt: ts('referral_rewarded_at'),
+    /** Бонусный баланс в сумах: тратится на оплату заказов через безопасную сделку. */
+    bonusUzs: money('bonus_uzs').notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [index('users_phone_hash_idx').on(t.phoneHash), index('users_referred_by_idx').on(t.referredByUserId)],
+);
 
 export const staff = pgTable('staff', {
   userId: integer('user_id')
@@ -71,6 +82,8 @@ export const companies = pgTable(
     offersSent: integer('offers_sent').notNull().default(0),
     medianResponseMin: integer('median_response_min'),
     blocked: boolean('blocked').notNull().default(false),
+    /** Демо-витрина для показа и разработки. В production не участвует в рассылке; удаляется командой seed:demo --remove. */
+    isDemo: boolean('is_demo').notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex('companies_inn_hash_uq').on(t.innHash).where(sql`${t.innHash} is not null`)],
@@ -88,7 +101,28 @@ export const memberships = pgTable(
     role: varchar('role', { length: 16 }).notNull().default('owner'),
     createdAt: createdAt(),
   },
-  (t) => [primaryKey({ columns: [t.userId, t.companyId] })],
+  (t) => [primaryKey({ columns: [t.userId, t.companyId] }), index('memberships_company_idx').on(t.companyId)],
+);
+
+/** Одноразовая ссылка-приглашение в команду компании. Число мест ограничено тарифом. */
+export const companyInvites = pgTable(
+  'company_invites',
+  {
+    id: serial('id').primaryKey(),
+    companyId: integer('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    token: varchar('token', { length: 64 }).notNull().unique(),
+    role: varchar('role', { length: 16 }).notNull().default('manager'),
+    createdByUserId: integer('created_by_user_id')
+      .notNull()
+      .references(() => users.id),
+    expiresAt: ts('expires_at').notNull(),
+    usedByUserId: integer('used_by_user_id').references(() => users.id),
+    usedAt: ts('used_at'),
+    createdAt: createdAt(),
+  },
+  (t) => [index('company_invites_company_idx').on(t.companyId)],
 );
 
 // ───────────────────────── Каталог ─────────────────────────
@@ -104,6 +138,8 @@ export const categories = pgTable(
     keywords: text('keywords').notNull().default(''),
     sort: integer('sort').notNull().default(0),
     active: boolean('active').notNull().default(true),
+    /** Когда команда правила категорию в админке: сид больше не перезаписывает её поля, ключевые слова и активность. */
+    editedAt: ts('edited_at'),
   },
   (t) => [index('categories_parent_idx').on(t.parentId)],
 );
@@ -130,6 +166,63 @@ export const serviceAreas = pgTable(
     regionCode: varchar('region_code', { length: 64 }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.companyId, t.regionCode] })],
+);
+
+/**
+ * Витрина исполнителя: готовая услуга с пакетами и ценой «от», как на Fiverr.
+ * Заказ по услуге — это заявка, которая сначала уходит этому исполнителю, а затем, для сравнения, остальным.
+ */
+export const gigs = pgTable(
+  'gigs',
+  {
+    id: serial('id').primaryKey(),
+    companyId: integer('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    categoryId: integer('category_id').references(() => categories.id, { onDelete: 'set null' }),
+    title: varchar('title', { length: 160 }).notNull(),
+    description: text('description').notNull().default(''),
+    /** Путь или URL обложки и галереи. */
+    cover: varchar('cover', { length: 300 }),
+    gallery: jsonb('gallery').$type<string[]>().notNull().default([]),
+    packages: jsonb('packages').$type<GigPackage[]>().notNull().default([]),
+    tags: jsonb('tags').$type<string[]>().notNull().default([]),
+    ordersCount: integer('orders_count').notNull().default(0),
+    active: boolean('active').notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [index('gigs_company_idx').on(t.companyId), index('gigs_category_idx').on(t.categoryId, t.active)],
+);
+
+export const favorites = pgTable(
+  'favorites',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    gigId: integer('gig_id')
+      .notNull()
+      .references(() => gigs.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.gigId] })],
+);
+
+/** Последний просмотр услуги пользователем: «недавно смотрели» и напоминание, если заказ так и не оформлен. */
+export const gigViews = pgTable(
+  'gig_views',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    gigId: integer('gig_id')
+      .notNull()
+      .references(() => gigs.id, { onDelete: 'cascade' }),
+    viewedAt: ts('viewed_at').notNull().defaultNow(),
+    remindedAt: ts('reminded_at'),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.gigId] }), index('gig_views_viewed_idx').on(t.viewedAt)],
 );
 
 // ───────────────────────── Файлы ─────────────────────────
@@ -173,9 +266,15 @@ export const requests = pgTable(
     answers: jsonb('answers').$type<{ q: string; a: string }[]>().notNull().default([]),
     wave: integer('wave').notNull().default(0),
     moderationReason: text('moderation_reason'),
+    /** Заказ с витрины: услуга, выбранный пакет и исполнитель, который получает заявку первым. */
+    gigId: integer('gig_id').references(() => gigs.id, { onDelete: 'set null' }),
+    gigPackage: varchar('gig_package', { length: 16 }),
+    preferredCompanyId: integer('preferred_company_id').references(() => companies.id, { onDelete: 'set null' }),
     submittedAt: ts('submitted_at'),
     closedAt: ts('closed_at'),
     expiresAt: ts('expires_at'),
+    /** Напомнили автору о неотправленном черновике. */
+    remindedAt: ts('reminded_at'),
     createdAt: createdAt(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -276,9 +375,32 @@ export const deals = pgTable(
     buyerConfirmedAt: ts('buyer_confirmed_at'),
     supplierConfirmedAt: ts('supplier_confirmed_at'),
     completedAt: ts('completed_at'),
+    /** Кто отменил или открыл спор: buyer, supplier или staff. */
+    closedBy: varchar('closed_by', { length: 16 }),
+    closeReason: text('close_reason'),
+    cancelledAt: ts('cancelled_at'),
+    disputedAt: ts('disputed_at'),
+    remindedAt: ts('reminded_at'),
+    /**
+     * Безопасная сделка: none → awaiting (счёт выставлен) → held (деньги у платформы)
+     * → payout_due → paid_out после приёмки, или refund_due → refunded при отмене.
+     */
+    paymentStatus: varchar('payment_status', { length: 16 }).notNull().default('none'),
+    paidAt: ts('paid_at'),
+    /** Комиссия платформы, удерживается из выплаты исполнителю. */
+    feeUzs: money('fee_uzs').notNull().default(0),
+    settledAt: ts('settled_at'),
+    reorderNudgedAt: ts('reorder_nudged_at'),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex('deals_request_uq').on(t.requestId), index('deals_supplier_idx').on(t.supplierCompanyId)],
+  (t) => [
+    index('deals_payment_idx').on(t.paymentStatus),
+    // Отменённая сделка не мешает выбрать по заявке другого исполнителя.
+    uniqueIndex('deals_request_active_uq').on(t.requestId).where(sql`${t.status} <> 'cancelled'`),
+    index('deals_request_idx').on(t.requestId),
+    index('deals_supplier_idx').on(t.supplierCompanyId),
+    index('deals_status_idx').on(t.status, t.createdAt),
+  ],
 );
 
 export const reviews = pgTable(
@@ -297,6 +419,9 @@ export const reviews = pgTable(
     stars: integer('stars').notNull(),
     text: text('text'),
     hidden: boolean('hidden').notNull().default(false),
+    /** Учитывается ли отзыв в рейтинге. false — признаки накрутки, отзыв виден, но на рейтинг не влияет. */
+    counted: boolean('counted').notNull().default(true),
+    flag: varchar('flag', { length: 32 }),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex('reviews_deal_side_uq').on(t.dealId, t.authorSide), index('reviews_target_idx').on(t.targetCompanyId)],
@@ -308,9 +433,9 @@ export const chats = pgTable(
   'chats',
   {
     id: serial('id').primaryKey(),
-    requestId: integer('request_id')
-      .notNull()
-      .references(() => requests.id, { onDelete: 'cascade' }),
+    /** null — вопрос по услуге до заказа: контакты в таком чате всегда скрыты. */
+    requestId: integer('request_id').references(() => requests.id, { onDelete: 'cascade' }),
+    gigId: integer('gig_id').references(() => gigs.id, { onDelete: 'set null' }),
     supplierCompanyId: integer('supplier_company_id')
       .notNull()
       .references(() => companies.id),
@@ -320,7 +445,10 @@ export const chats = pgTable(
     lastMessageAt: ts('last_message_at'),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex('chats_request_supplier_uq').on(t.requestId, t.supplierCompanyId)],
+  (t) => [
+    uniqueIndex('chats_request_supplier_uq').on(t.requestId, t.supplierCompanyId),
+    uniqueIndex('chats_gig_buyer_uq').on(t.gigId, t.buyerUserId).where(sql`${t.requestId} is null`),
+  ],
 );
 
 export const messages = pgTable(
@@ -362,12 +490,18 @@ export const invoices = pgTable(
   'invoices',
   {
     id: serial('id').primaryKey(),
+    /** plan — подписка компании; deal — оплата заказа покупателем (company_id — исполнитель). */
+    kind: varchar('kind', { length: 8 }).notNull().default('plan'),
     companyId: integer('company_id')
       .notNull()
       .references(() => companies.id),
-    planCode: varchar('plan_code', { length: 16 }).notNull(),
+    planCode: varchar('plan_code', { length: 16 }),
+    dealId: integer('deal_id').references(() => deals.id),
     months: integer('months').notNull().default(1),
+    /** К оплате. Для заказа: сумма сделки минус скидка на первый заказ и списанные бонусы. */
     amountUzs: money('amount_uzs').notNull(),
+    discountUzs: money('discount_uzs').notNull().default(0),
+    bonusUzs: money('bonus_uzs').notNull().default(0),
     status: varchar('status', { length: 16 }).notNull().default('issued'),
     payToken: varchar('pay_token', { length: 64 }).notNull().unique(),
     issuedByUserId: integer('issued_by_user_id').references(() => users.id),
@@ -376,7 +510,10 @@ export const invoices = pgTable(
     note: text('note'),
     createdAt: createdAt(),
   },
-  (t) => [index('invoices_company_idx').on(t.companyId)],
+  (t) => [
+    index('invoices_company_idx').on(t.companyId),
+    uniqueIndex('invoices_deal_open_uq').on(t.dealId).where(sql`${t.kind} = 'deal' and ${t.status} <> 'cancelled'`),
+  ],
 );
 
 /** Транзакции платёжных систем. (provider, provider_txn_id) уникальны: повторный вебхук не зачтёт оплату дважды. */
@@ -398,7 +535,7 @@ export const payments = pgTable(
     reason: integer('reason'),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex('payments_provider_txn_uq').on(t.provider, t.providerTxnId)],
+  (t) => [uniqueIndex('payments_provider_txn_uq').on(t.provider, t.providerTxnId), index('payments_invoice_idx').on(t.invoiceId, t.state)],
 );
 
 // ───────────────────────── Уведомления, модерация, аналитика ─────────────────────────
@@ -417,7 +554,7 @@ export const notifications = pgTable(
     sentAt: ts('sent_at'),
     createdAt: createdAt(),
   },
-  (t) => [index('notifications_user_idx').on(t.userId, t.createdAt)],
+  (t) => [index('notifications_user_idx').on(t.userId, t.createdAt), index('notifications_status_idx').on(t.status, t.createdAt)],
 );
 
 export const moderationItems = pgTable(

@@ -46,8 +46,8 @@ export class NotificationSender {
     const mark = (status: string, error?: string) =>
       this.db.update(notifications).set({ status, error: error ?? null, sentAt: status === 'sent' ? new Date() : null }).where(eq(notifications.id, n.id));
 
-    if (!u || u.botBlocked || !u.botStarted) {
-      await mark('skipped', u?.botBlocked ? 'bot_blocked' : 'bot_not_started');
+    if (!u || u.deletedAt || u.botBlocked || !u.botStarted) {
+      await mark('skipped', !u || u.deletedAt ? 'deleted' : u.botBlocked ? 'bot_blocked' : 'bot_not_started');
       return 'skipped';
     }
     if (n.payload._respectOnline && (await this.notifications.isOnline(u.id))) {

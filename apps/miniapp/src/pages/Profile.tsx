@@ -1,12 +1,13 @@
 import { LANGS, type Lang } from '@dominify/shared';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { get, patch, post, type Me, type PlanInfo } from '../api';
+import { del, get, patch, post, type Me, type PlanInfo, type TeamMember } from '../api';
 import { LANG_NAMES, useT } from '../i18n';
 import { useSession } from '../session';
-import { haptic, requestContact, requestWriteAccess } from '../tg';
-import { BackButton, Empty, fmtDate, Section, Spinner, Stars, TrustBadge, useToast } from '../ui';
+import { disconnectSocket } from '../socket';
+import { alertMsg, confirm, haptic, openTelegramLink, requestContact, requestWriteAccess, tg } from '../tg';
+import { BackButton, Empty, fmtDate, Icons, money, Section, Spinner, Stars, TrustBadge, useToast } from '../ui';
 
 const SUPPORT_URL = (import.meta.env.VITE_SUPPORT_URL as string | undefined) ?? 'https://t.me/dominify_support';
 
@@ -72,6 +73,24 @@ export function Profile() {
         )}
       </Section>
 
+      <Section body={false}>
+        <div className="cell" onClick={() => nav('/invite')}>
+          <span className="cell-icon">{Icons.gift}</span>
+          <div className="cell-main">
+            <div className="cell-title">{t('inviteTitle')}</div>
+            <div className="cell-sub">{t.f('inviteBannerTpl', money(me.referral.bonusUzs))}</div>
+          </div>
+          <div className="cell-right">{me.bonusUzs > 0 ? <b className="good-text">{money(me.bonusUzs)}</b> : <span className="chev" />}</div>
+        </div>
+        <div className="cell" onClick={() => nav('/saved')}>
+          <span className="cell-icon">{Icons.heart}</span>
+          <div className="cell-main">
+            <div className="cell-title">{t('savedTitle')}</div>
+          </div>
+          <div className="cell-right"><span className="chev" /></div>
+        </div>
+      </Section>
+
       <Section title={t('notifications')}>
         {me.botStarted ? (
           <span className="pill good">✓ {t('notificationsOn')}</span>
@@ -104,6 +123,8 @@ export function Profile() {
         </div>
       </Section>
 
+      {supplierCompanyId && <TeamSection companyId={supplierCompanyId} />}
+
       {supplierCompanyId && (
         <Section body={false}>
           <div className="cell" onClick={() => nav('/plan')}>
@@ -131,7 +152,85 @@ export function Profile() {
           <span className="chev" />
         </a>
       </Section>
+
+      <button className="btn ghost" style={{ color: 'var(--danger, #e5484d)' }} disabled={busy} onClick={deleteAccount}>
+        {t('deleteAccount')}
+      </button>
     </>
+  );
+
+  async function deleteAccount() {
+    if (!(await confirm(t('deleteAccountAsk')))) return;
+    setBusy(true);
+    try {
+      await del('/v1/me');
+      disconnectSocket();
+      await alertMsg(t('accountDeleted'));
+      if (tg) tg.close();
+      else window.location.reload();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+      setBusy(false);
+    }
+  }
+}
+
+function TeamSection({ companyId }: { companyId: number }) {
+  const t = useT();
+  const toast = useToast();
+  const { me, setMe } = useSession();
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ['team', companyId], queryFn: () => get<{ seats: number; members: TeamMember[] }>(`/v1/companies/${companyId}/members`) });
+  const [busy, setBusy] = useState(false);
+  if (!q.data) return null;
+  const amOwner = q.data.members.some((m) => m.userId === me.id && m.role === 'owner');
+
+  const invite = async () => {
+    setBusy(true);
+    try {
+      const r = await post<{ url: string }>(`/v1/companies/${companyId}/invites`);
+      const copied = await navigator.clipboard?.writeText(r.url).then(() => true).catch(() => false);
+      if (copied) toast(t('inviteCopied'));
+      openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(r.url)}`);
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (userId: number) => {
+    if (!(await confirm(t('removeMemberAsk')))) return;
+    try {
+      await del(`/v1/companies/${companyId}/members/${userId}`);
+      if (userId === me.id) setMe(await get<Me>('/v1/me'));
+      else qc.invalidateQueries({ queryKey: ['team', companyId] });
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+
+  return (
+    <Section title={`${t('team')} · ${t('seats')}: ${q.data.members.length}/${q.data.seats}`} body={false}>
+      {q.data.members.map((m) => (
+        <div key={m.userId} className="cell">
+          <div className="cell-main">
+            <div className="cell-title">{m.firstName || (m.username ? `@${m.username}` : `#${m.userId}`)}</div>
+            <div className="cell-sub">{t(m.role === 'owner' ? 'owner' : 'manager')}</div>
+          </div>
+          {m.role !== 'owner' && (amOwner || m.userId === me.id) && (
+            <button className="btn ghost" onClick={() => remove(m.userId)}>
+              {m.userId === me.id ? t('leaveCompany') : t('removeMember')}
+            </button>
+          )}
+        </div>
+      ))}
+      {amOwner && (
+        <div className="cell" onClick={busy ? undefined : invite}>
+          <div className="cell-main" style={{ color: 'var(--link)', fontWeight: 600 }}>+ {t('invite')}</div>
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -188,6 +287,50 @@ export function PlanPage() {
           </button>
         </div>
       </Section>
+    </>
+  );
+}
+
+/** Пригласить друга: ссылка на Mini App с кодом, счётчики и бонусный баланс. */
+export function InvitePage() {
+  const t = useT();
+  const toast = useToast();
+  const { me, setMe } = useSession();
+  useQuery({ queryKey: ['me-refresh'], queryFn: async () => { const fresh = await get<Me>('/v1/me'); setMe(fresh); return fresh.id; } });
+  const r = me.referral;
+  const share = () => {
+    const url = `https://t.me/share/url?url=${encodeURIComponent(r.link)}&text=${encodeURIComponent(t('inviteShareText'))}`;
+    openTelegramLink(url);
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(r.link);
+      toast(t('refLinkCopied'));
+    } catch {
+      toast(r.link);
+    }
+  };
+  return (
+    <>
+      <BackButton to="/profile" />
+      <div className="invite-hero">
+        <span className="promo-icon big">{Icons.gift}</span>
+        <h1>{t('inviteTitle')}</h1>
+        <p className="small">{t.f('inviteText', money(r.bonusUzs))}</p>
+      </div>
+      <Section>
+        <div className="stack">
+          <div className="invite-link mono small">{r.link}</div>
+          <button className="btn block" onClick={share}>{t('inviteShare')}</button>
+          <button className="btn secondary block" onClick={copy}>{t('inviteCopy')}</button>
+        </div>
+      </Section>
+      <div className="stats">
+        <div><span className="muted small">{t('invitedCount')}</span><b>{r.invited}</b></div>
+        <div><span className="muted small">{t('rewardedCount')}</span><b>{r.rewarded}</b></div>
+        <div><span className="muted small">{t('bonusBalance')}</span><b>{money(me.bonusUzs)}</b></div>
+      </div>
+      <p className="muted small" style={{ padding: '0 4px' }}>{t('bonusHint')}</p>
     </>
   );
 }

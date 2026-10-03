@@ -260,4 +260,33 @@ export const CATALOG: SeedCategory[] = [
       },
     ],
   },
+  {
+    slug: 'design',
+    name: t3('Дизайн и брендинг', 'Dizayn va brending'),
+    keywords: 'дизайн макет брендинг dizayn maket brending',
+    fields: [],
+    children: [
+      {
+        slug: 'design.logo',
+        name: t3('Логотипы', 'Logotiplar'),
+        keywords: 'логотип лого logo logotip',
+        fields: [
+          f.text('brand', 'Название бренда', 'Brend nomi', true, 'Как называется бренд?', 'Brend qanday nomlanadi?'),
+          f.text('style', 'Стиль и пожелания', 'Uslub va istaklar'),
+        ],
+      },
+      {
+        slug: 'design.identity',
+        name: t3('Фирменный стиль и брендбук', 'Firma uslubi va brendbuk'),
+        keywords: 'фирменн стиль брендбук айдентик brendbuk firma uslub',
+        fields: [f.text('brand', 'Название бренда', 'Brend nomi', true, 'Как называется бренд?', 'Brend qanday nomlanadi?'), f.text('items', 'Что входит', 'Nimalar kiradi')],
+      },
+      {
+        slug: 'design.layout',
+        name: t3('Макеты для печати и рекламы', 'Chop etish va reklama uchun maketlar'),
+        keywords: 'макет дизайн баннер дизайн листовк maket dizayn',
+        fields: [f.text('item', 'Для чего макет', 'Maket nima uchun', true, 'Для чего нужен макет: баннер, листовка, вывеска?', 'Maket nima uchun kerak: banner, varaqa, peshlavha?'), f.size(false)],
+      },
+    ],
+  },
 ];

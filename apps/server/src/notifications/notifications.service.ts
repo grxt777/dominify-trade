@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { memberships, notifications, type Db } from '@dominify/db';
-import { eq } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import IORedis from 'ioredis';
 import type { Config } from '../config';
 import { QueueService } from '../infra/queues';
@@ -41,6 +41,35 @@ export class NotificationsService {
   async notifyCompany(companyId: number, type: NotificationType, payload: Record<string, unknown>, opts: NotifyOpts = {}) {
     const rows = await this.db.select({ userId: memberships.userId }).from(memberships).where(eq(memberships.companyId, companyId));
     for (const r of rows) await this.notify(r.userId, type, payload, opts);
+  }
+
+  /**
+   * Страховка на случай, когда запись уведомления создана, а задача в Redis не попала (сбой Redis, рестарт).
+   * jobId у задачи фиксированный (n-<id>), поэтому для уже стоящих в очереди повторная постановка ничего не меняет.
+   * Застрявшие дольше двух суток уже неактуальны и помечаются как failed.
+   */
+  async sweep(): Promise<{ requeued: number; expired: number }> {
+    const expired = await this.db
+      .update(notifications)
+      .set({ status: 'failed', error: 'stale' })
+      .where(and(eq(notifications.status, 'queued'), lt(notifications.createdAt, sql`now() - interval '2 days'`)))
+      .returning({ id: notifications.id });
+    const stuck = await this.db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(and(eq(notifications.status, 'queued'), lt(notifications.createdAt, sql`now() - interval '10 minutes'`)))
+      .orderBy(notifications.createdAt)
+      .limit(500);
+    for (const n of stuck) await this.queues.notify({ notificationId: n.id });
+    return { requeued: stuck.length, expired: expired.length };
+  }
+
+  /** Все попытки отправки исчерпаны: уведомление больше не ждёт в статусе queued. */
+  async markFailed(notificationId: number, error: string) {
+    await this.db
+      .update(notifications)
+      .set({ status: 'failed', error: error.slice(0, 500) })
+      .where(and(eq(notifications.id, notificationId), eq(notifications.status, 'queued')));
   }
 
   /** Пользователь сейчас в Mini App: сокет пингует ключ online:<id>. */

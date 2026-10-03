@@ -1,10 +1,10 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Patch, Post, Req } from '@nestjs/common';
 import { staff, users, type Db } from '@dominify/db';
 import { updateMeSchema, type UpdateMeDto } from '@dominify/shared';
 import { eq } from 'drizzle-orm';
 import type { Request } from 'express';
 import { z } from 'zod';
-import { adminTelegramIds, type Config } from '../config';
+import { adminTelegramIds, devAuthAllowed, type Config } from '../config';
 import { AppError, ZodPipe } from '../common/http';
 import { signJwt } from '../common/jwt';
 import { Analytics } from '../infra/infra.module';
@@ -40,6 +40,8 @@ export class AuthController {
       throw new AppError('blocked', 'Доступ ограничен', HttpStatus.FORBIDDEN);
     }
     const user = await this.users.upsertFromTelegram(valid.user);
+    if (await this.users.isUserBlocked(user)) throw new AppError('blocked', 'Доступ ограничен', HttpStatus.FORBIDDEN);
+    if (valid.startParam?.startsWith('ref_')) await this.users.attributeReferral(user.id, valid.startParam);
     this.analytics.track('auth.miniapp', user.id, { startParam: valid.startParam });
     return {
       token: signJwt({ sub: user.id, tg: user.telegramId, scope: 'user' }, this.cfg.JWT_SECRET, this.cfg.JWT_TTL_SEC),
@@ -64,14 +66,19 @@ export class AuthController {
     return this.issueAdmin(tg.id, tg);
   }
 
-  /** Вход без Telegram для локальной разработки. Работает только при DEV_AUTH=1 и не в production. */
+  /** Вход без Telegram для локальной разработки и e2e. Работает только при DEV_AUTH=1 и NODE_ENV=development|test. */
   @Public()
   @Post('dev')
   @HttpCode(HttpStatus.OK)
-  async dev(@Body(new ZodPipe(z.object({ telegramId: z.number().int().positive(), firstName: z.string().optional(), admin: z.boolean().optional() }))) body: { telegramId: number; firstName?: string; admin?: boolean }) {
-    if (!this.cfg.DEV_AUTH || this.cfg.NODE_ENV === 'production') throw new AppError('not_found', 'Не найдено', HttpStatus.NOT_FOUND);
+  async dev(
+    @Body(new ZodPipe(z.object({ telegramId: z.number().int().positive(), firstName: z.string().optional(), admin: z.boolean().optional(), phone: z.string().regex(/^\+?\d{9,12}$/).optional() })))
+    body: { telegramId: number; firstName?: string; admin?: boolean; phone?: string },
+  ) {
+    if (!devAuthAllowed(this.cfg)) throw new AppError('not_found', 'Не найдено', HttpStatus.NOT_FOUND);
     if (body.admin) return this.issueAdmin(body.telegramId, { id: body.telegramId, first_name: body.firstName ?? 'Admin' });
     const user = await this.users.upsertFromTelegram({ id: body.telegramId, first_name: body.firstName ?? 'Dev', language_code: 'ru' }, { botStarted: true });
+    // В Telegram номер подтверждает бот по кнопке «Поделиться контактом»; в dev-режиме — сразу.
+    if (body.phone) await this.users.setVerifiedPhone(user.id, body.phone);
     return {
       token: signJwt({ sub: user.id, tg: user.telegramId, scope: 'user' }, this.cfg.JWT_SECRET, this.cfg.JWT_TTL_SEC),
       expiresIn: this.cfg.JWT_TTL_SEC,
@@ -81,6 +88,7 @@ export class AuthController {
   }
 
   private async issueAdmin(telegramId: number, tg: { id: number; first_name?: string; last_name?: string; username?: string }) {
+    if (await this.users.isBlacklisted('telegram_id', String(telegramId))) throw new AppError('blocked', 'Доступ ограничен', HttpStatus.FORBIDDEN);
     const user = await this.users.upsertFromTelegram({ ...tg, id: telegramId });
     const [st] = await this.db.select().from(staff).where(eq(staff.userId, user.id));
     if (!st) {
@@ -122,5 +130,21 @@ export class MeController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async consent(@CurrentUser() u: AuthUser) {
     await this.users.consent(u.id);
+  }
+
+  /** Пришёл по пригласительной ссылке друга (startapp=ref_xxx). */
+  @Post('referral')
+  @HttpCode(HttpStatus.OK)
+  @RateLimit('referral', 10, 3600)
+  async referral(@CurrentUser() u: AuthUser, @Body(new ZodPipe(z.object({ code: z.string().max(20) }))) b: { code: string }) {
+    return { applied: await this.users.attributeReferral(u.id, b.code) };
+  }
+
+  /** Удалить аккаунт: персональные данные стираются, история сделок остаётся обезличенной. */
+  @Delete()
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RateLimit('delete-me', 3, 3600)
+  async deleteMe(@CurrentUser() u: AuthUser) {
+    await this.users.deleteAccount(u.id);
   }
 }

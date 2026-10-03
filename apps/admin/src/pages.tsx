@@ -158,6 +158,8 @@ const KIND: Record<string, string> = {
   request_no_offers: 'Нет откликов после двух волн',
   billing_contact: 'Просят связаться по тарифу',
   complaint: 'Жалоба',
+  deal_dispute: 'Спор по сделке',
+  review_suspicious: 'Подозрительный отзыв',
 };
 
 export function Moderation() {
@@ -165,7 +167,16 @@ export function Moderation() {
   const q = useQuery({ queryKey: ['moderation', status], queryFn: () => get<ModItem[]>(`/admin/moderation?status=${status}`) });
   const a = useAction();
   const nav = useNavigate();
-  const target = (m: ModItem) => (m.refType === 'request' ? `/requests/${m.refId}` : m.refType === 'company' ? `/companies/${m.refId}` : null);
+  const target = (m: ModItem) =>
+    m.refType === 'request'
+      ? `/requests/${m.refId}`
+      : m.refType === 'company'
+        ? `/companies/${m.refId}`
+        : m.refType === 'deal'
+          ? '/disputes'
+          : m.refType === 'review'
+            ? '/reviews'
+            : null;
   return (
     <>
       <h1>Модерация</h1>
@@ -195,6 +206,326 @@ export function Moderation() {
                       <button className="btn sec" disabled={a.busy} onClick={() => a.run(() => post(`/admin/moderation/${m.id}/resolve`, { resolution: 'done' }))}>
                         Закрыть
                       </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Loading>
+      </div>
+    </>
+  );
+}
+
+/* ───────── Споры по сделкам ───────── */
+
+interface DealRow {
+  id: number;
+  requestId: number;
+  title: string | null;
+  status: string;
+  amountUzs: number;
+  supplierCompanyId: number;
+  supplierName: string;
+  buyer: string | null;
+  buyerConfirmed: boolean;
+  supplierConfirmed: boolean;
+  closedBy: string | null;
+  closeReason: string | null;
+  disputedAt: string | null;
+  createdAt: string;
+}
+
+const DEAL_STATUS: Record<string, [string, string]> = {
+  active: ['В работе', 'cyan'],
+  completed: ['Закрыта', 'good'],
+  disputed: ['Спор', 'yellow'],
+  cancelled: ['Отменена', ''],
+};
+const SIDE: Record<string, string> = { buyer: 'покупатель', supplier: 'поставщик', staff: 'модератор', auto: 'автоматически' };
+
+export function Disputes() {
+  const [status, setStatus] = useState('disputed');
+  const q = useQuery({ queryKey: ['deals', status], queryFn: () => get<DealRow[]>(`/admin/deals?status=${status}`) });
+  const a = useAction();
+  const resolve = (d: DealRow, outcome: 'complete' | 'cancel' | 'resume', label: string) => {
+    const note = window.prompt(`${label}. Комментарий для сторон (необязательно):`, '');
+    if (note === null) return;
+    void a.run(() => post(`/admin/deals/${d.id}/resolve`, { outcome, note: note.trim() || undefined }));
+  };
+  return (
+    <>
+      <h1>Сделки и споры</h1>
+      <div className="filters">
+        <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="disputed">Споры</option>
+          <option value="active">В работе</option>
+          <option value="cancelled">Отменённые</option>
+          <option value="completed">Закрытые</option>
+          <option value="all">Все</option>
+        </select>
+      </div>
+      <div className="card">
+        <Loading q={q}>
+          {q.data?.length === 0 && <p className="muted">Пусто.</p>}
+          <table>
+            <thead>
+              <tr>
+                <th>Сделка</th>
+                <th>Стороны</th>
+                <th className="num">Сумма</th>
+                <th>Подтверждения</th>
+                <th>Причина</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {q.data?.map((d) => (
+                <tr key={d.id}>
+                  <td>
+                    <b>#{d.id}</b> <span className={`pill ${DEAL_STATUS[d.status]?.[1] ?? ''}`}>{DEAL_STATUS[d.status]?.[0] ?? d.status}</span>
+                    <div className="small">
+                      <Link to={`/requests/${d.requestId}`}>{d.title || `Заявка #${d.requestId}`}</Link>
+                    </div>
+                    <div className="small muted">{dt(d.disputedAt ?? d.createdAt)}</div>
+                  </td>
+                  <td className="small">
+                    <div>Покупатель: {d.buyer ?? '—'}</div>
+                    <div>
+                      Поставщик: <Link to={`/companies/${d.supplierCompanyId}`}>{d.supplierName}</Link>
+                    </div>
+                  </td>
+                  <td className="num">{money(d.amountUzs)}</td>
+                  <td className="small">
+                    <div>покупатель {d.buyerConfirmed ? '✓' : '—'}</div>
+                    <div>поставщик {d.supplierConfirmed ? '✓' : '—'}</div>
+                  </td>
+                  <td className="small">
+                    {d.closedBy && <div className="muted">{SIDE[d.closedBy] ?? d.closedBy}:</div>}
+                    {d.closeReason}
+                  </td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {d.status === 'disputed' && (
+                      <div className="row" style={{ justifyContent: 'flex-end' }}>
+                        <button className="btn" disabled={a.busy} onClick={() => resolve(d, 'complete', 'Закрыть как выполненную')}>
+                          Выполнена
+                        </button>
+                        <button className="btn sec" disabled={a.busy} onClick={() => resolve(d, 'resume', 'Продолжить сделку')}>
+                          Продолжить
+                        </button>
+                        <button className="btn sec" disabled={a.busy} onClick={() => resolve(d, 'cancel', 'Отменить и открыть заявку снова')}>
+                          Отменить
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Loading>
+      </div>
+    </>
+  );
+}
+
+/* ───────── Безопасные платежи ───────── */
+
+interface EscrowRow {
+  id: number;
+  requestId: number;
+  title: string | null;
+  status: string;
+  paymentStatus: string;
+  amountUzs: number;
+  feeUzs: number;
+  paidUzs: number | null;
+  paidVia: string | null;
+  paidAt: string | null;
+  settledAt: string | null;
+  supplierCompanyId: number;
+  supplierName: string;
+  buyer: string | null;
+}
+
+const PAY_STATUS: Record<string, [string, string]> = {
+  awaiting: ['Ждёт оплаты', ''],
+  held: ['Деньги у платформы', 'cyan'],
+  payout_due: ['К выплате исполнителю', 'yellow'],
+  paid_out: ['Выплачено', 'good'],
+  refund_due: ['К возврату покупателю', 'magenta'],
+  refunded: ['Возвращено', ''],
+};
+
+export function Escrow() {
+  const [status, setStatus] = useState('payout_due');
+  const q = useQuery({ queryKey: ['escrow', status], queryFn: () => get<EscrowRow[]>(`/admin/escrow?status=${status}`) });
+  const a = useAction();
+  const total = (q.data ?? []).reduce((s, r) => s + (r.paymentStatus === 'payout_due' ? r.amountUzs - r.feeUzs : r.paidUzs ?? 0), 0);
+  return (
+    <>
+      <h1>Безопасные платежи</h1>
+      <p className="muted">
+        Покупатель платит платформе через Payme или Click. После приёмки работы деньги за вычетом комиссии переводятся исполнителю,
+        при отмене — возвращаются покупателю. Отметьте выплату или возврат после перевода по банку.
+      </p>
+      <div className="filters">
+        <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="payout_due">К выплате</option>
+          <option value="refund_due">К возврату</option>
+          <option value="held">Деньги у платформы</option>
+          <option value="awaiting">Ждут оплаты</option>
+          <option value="paid_out">Выплачено</option>
+          <option value="refunded">Возвращено</option>
+          <option value="all">Все</option>
+        </select>
+        {(status === 'payout_due' || status === 'refund_due') && !!q.data?.length && (
+          <span className="muted">Итого: <b>{money(total)} сум</b></span>
+        )}
+      </div>
+      <div className="card">
+        <Loading q={q}>
+          {q.data?.length === 0 ? <p className="muted">Пусто.</p> : (
+          <table>
+            <thead>
+              <tr>
+                <th>Сделка</th>
+                <th>Стороны</th>
+                <th className="num">Заказ</th>
+                <th className="num">Оплачено</th>
+                <th className="num">Исполнителю</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {q.data?.map((d) => (
+                <tr key={d.id}>
+                  <td>
+                    <b>#{d.id}</b> <span className={`pill ${PAY_STATUS[d.paymentStatus]?.[1] ?? ''}`}>{PAY_STATUS[d.paymentStatus]?.[0] ?? d.paymentStatus}</span>
+                    <div className="small">
+                      <Link to={`/requests/${d.requestId}`}>{d.title || `Заявка #${d.requestId}`}</Link>
+                    </div>
+                    <div className="small muted">
+                      {DEAL_STATUS[d.status]?.[0] ?? d.status} · оплата {dt(d.paidAt)}
+                      {d.settledAt ? ` · закрыто ${dt(d.settledAt)}` : ''}
+                    </div>
+                  </td>
+                  <td className="small">
+                    <div>Покупатель: {d.buyer ?? '—'}</div>
+                    <div>
+                      Исполнитель: <Link to={`/companies/${d.supplierCompanyId}`}>{d.supplierName}</Link>
+                    </div>
+                  </td>
+                  <td className="num">{money(d.amountUzs)}</td>
+                  <td className="num">
+                    {money(d.paidUzs)}
+                    {d.paidVia && <div className="small muted">{d.paidVia}</div>}
+                  </td>
+                  <td className="num">
+                    {d.paidAt ? (
+                      <>
+                        {money(d.amountUzs - d.feeUzs)}
+                        <div className="small muted">комиссия {money(d.feeUzs)}</div>
+                      </>
+                    ) : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {d.paymentStatus === 'payout_due' && (
+                      <button
+                        className="btn"
+                        disabled={a.busy}
+                        onClick={() => a.run(() => post(`/admin/escrow/${d.id}/payout`), `Отметить выплату ${money(d.amountUzs - d.feeUzs)} сум исполнителю «${d.supplierName}»?`)}
+                      >
+                        Выплачено
+                      </button>
+                    )}
+                    {d.paymentStatus === 'refund_due' && (
+                      <button
+                        className="btn sec"
+                        disabled={a.busy}
+                        onClick={() => a.run(() => post(`/admin/escrow/${d.id}/refund`), `Отметить возврат ${money(d.paidUzs)} сум покупателю?`)}
+                      >
+                        Возвращено
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          )}
+        </Loading>
+      </div>
+    </>
+  );
+}
+
+/* ───────── Отзывы ───────── */
+
+interface ReviewRow {
+  id: number;
+  dealId: number;
+  authorSide: string;
+  author: string | null;
+  targetCompanyId: number | null;
+  targetName: string | null;
+  stars: number;
+  text: string | null;
+  counted: boolean;
+  hidden: boolean;
+  flag: string | null;
+  createdAt: string;
+}
+
+const FLAG: Record<string, string> = {
+  self_review: 'Автор состоит в оцениваемой компании',
+  same_phone: 'Телефон автора совпадает с сотрудником компании',
+  unverified_author: 'Телефон автора не подтверждён',
+  repeat_pair: 'Повторный отзыв той же компании',
+};
+
+export function Reviews() {
+  const [flagged, setFlagged] = useState('1');
+  const q = useQuery({ queryKey: ['reviews', flagged], queryFn: () => get<ReviewRow[]>(`/admin/reviews?flagged=${flagged}`) });
+  const a = useAction();
+  return (
+    <>
+      <h1>Отзывы</h1>
+      <p className="muted small">Отзыв с признаком накрутки виден на профиле, но не влияет на рейтинг, пока модератор не решит иначе.</p>
+      <div className="filters">
+        <select className="input" value={flagged} onChange={(e) => setFlagged(e.target.value)}>
+          <option value="1">С признаками накрутки</option>
+          <option value="0">Все</option>
+        </select>
+      </div>
+      <div className="card">
+        <Loading q={q}>
+          {q.data?.length === 0 && <p className="muted">Пусто.</p>}
+          <table>
+            <tbody>
+              {q.data?.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ width: 120 }} className="muted small">{dt(r.createdAt)}</td>
+                  <td>
+                    <span className="stars">{'★'.repeat(r.stars)}</span> · {r.author ?? '—'} ({r.authorSide === 'buyer' ? 'покупатель' : 'поставщик'}) →{' '}
+                    {r.targetCompanyId ? <Link to={`/companies/${r.targetCompanyId}`}>{r.targetName}</Link> : '—'}
+                    {r.text && <div className="small">{r.text}</div>}
+                    {r.flag && <div className="small err">{FLAG[r.flag] ?? r.flag}</div>}
+                  </td>
+                  <td className="small">
+                    {r.hidden ? <span className="pill">скрыт</span> : r.counted ? <span className="pill good">в рейтинге</span> : <span className="pill yellow">не учитывается</span>}
+                  </td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {!r.hidden && (
+                      <div className="row" style={{ justifyContent: 'flex-end' }}>
+                        <button className="btn sec" disabled={a.busy} onClick={() => a.run(() => post(`/admin/reviews/${r.id}/counted`, { counted: !r.counted }))}>
+                          {r.counted ? 'Не учитывать' : 'Учитывать'}
+                        </button>
+                        <button className="btn sec" disabled={a.busy} onClick={() => a.run(() => post(`/admin/reviews/${r.id}/hide`), 'Скрыть отзыв?')}>
+                          Скрыть
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -654,9 +985,11 @@ export function CompanyPage() {
 
 interface InvoiceRow {
   id: number;
+  kind: 'plan' | 'deal';
+  dealId: number | null;
   companyId: number;
   companyName: string;
-  planCode: PlanCode;
+  planCode: PlanCode | null;
   months: number;
   amountUzs: number;
   status: string;
@@ -677,7 +1010,7 @@ function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
           <tr key={i.id}>
             <td><a href={`${api}/pay/${i.payToken}`} target="_blank" rel="noreferrer">{i.id}</a></td>
             <td><Link to={`/companies/${i.companyId}`}>{i.companyName}</Link></td>
-            <td>{PLANS[i.planCode]?.name.ru} × {i.months}</td>
+            <td>{i.kind === 'deal' ? `Оплата заказа, сделка #${i.dealId}` : `${PLANS[i.planCode ?? 'free']?.name.ru} × ${i.months}`}</td>
             <td className="num">{money(i.amountUzs)}</td>
             <td>
               <span className={`pill ${i.status === 'paid' ? 'good' : i.status === 'issued' ? 'yellow' : ''}`}>{i.status}</span>

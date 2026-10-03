@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { aiUsage, files, requestFiles, requests, type Db } from '@dominify/db';
+import { aiUsage, files, gigs, requestFiles, requests, type Db } from '@dominify/db';
 import { maskPII } from './text';
 import { CatalogService } from '../catalog/catalog';
 import { rulesParse, questionNoCategory, type CatalogEntry } from './rules-parser';
@@ -87,6 +87,18 @@ export class ParsingService {
       }
     } else {
       result = rulesParse(fullText, catalog);
+    }
+
+    // Заказ с витрины: категория и цена уже выбраны покупателем, модель лишь достаёт поля.
+    if (req.gigId) {
+      const [g] = await this.db.select({ categoryId: gigs.categoryId, packages: gigs.packages }).from(gigs).where(eq(gigs.id, req.gigId));
+      const gc = g?.categoryId ? catalog.find((c) => c.id === g.categoryId) : undefined;
+      if (gc) {
+        result.categorySlug = gc.slug;
+        result.confidence = Math.max(result.confidence, 0.95);
+      }
+      const pkg = g?.packages.find((p) => p.code === req.gigPackage);
+      if (pkg && !result.budgetUzs) result.budgetUzs = pkg.priceUzs;
     }
 
     // Не доверяем модели на слово: категория должна существовать и быть листовой.

@@ -1,4 +1,4 @@
-import type { CategoryNode, FieldDef, I18nText, Lang, PlanCode } from '@dominify/shared';
+import type { CategoryNode, FieldDef, GigPackage, I18nText, Lang, PlanCode } from '@dominify/shared';
 import { initData, inTelegram } from './tg';
 
 export const API_URL: string = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? 'http://localhost:3000';
@@ -53,6 +53,17 @@ export interface Me {
   botStarted: boolean;
   staffRole: string | null;
   companies: Company[];
+  bonusUzs: number;
+  referral: { code: string; link: string; bonusUzs: number; invited: number; rewarded: number };
+  /** Скидка на первый заказ с безопасной оплатой, если ещё не использована. */
+  firstOrder: { percent: number; maxUzs: number } | null;
+}
+
+export interface Stats {
+  dealsCompleted: number;
+  suppliers: number;
+  ordersToday: number;
+  avgRating: number | null;
 }
 
 export interface AuthResult {
@@ -103,6 +114,7 @@ export interface RequestView {
   submittedAt: string | null;
   expiresAt: string | null;
   wave: number;
+  order: RequestOrder | null;
   role: 'author' | 'supplier' | 'staff';
   // автор
   confidence?: number | null;
@@ -116,6 +128,83 @@ export interface RequestView {
   buyer?: { name: string; trustLevel: number };
   myOffer?: { id: number; priceUzs: number; leadTimeDays: number; comment: string | null; status: string } | null;
   isOpen?: boolean;
+}
+
+/** Заказ с витрины внутри заявки. */
+export interface RequestOrder {
+  gigId: number;
+  title: string;
+  cover: string | null;
+  companyId: number;
+  companyName: string;
+  package: Pick<GigPackage, 'code' | 'name' | 'priceUzs' | 'days' | 'revisions' | 'features'> | null;
+}
+
+export interface GigCard {
+  id: number;
+  title: string;
+  cover: string | null;
+  ordersCount: number;
+  categoryId: number | null;
+  fromPriceUzs: number | null;
+  fastestDays: number | null;
+  favorite: boolean;
+  company: SupplierBrief & { innVerified: boolean };
+}
+
+export interface GigView {
+  favorite: boolean;
+  /** Услуга своей компании: заказать и спросить нельзя. */
+  mine: boolean;
+  lastOrderAt: string | null;
+  id: number;
+  title: string;
+  description: string;
+  cover: string | null;
+  gallery: string[];
+  packages: GigPackage[];
+  tags: string[];
+  ordersCount: number;
+  category: { id: number; slug: string; name: I18nText } | null;
+  company: SupplierBrief & {
+    about: string | null;
+    owner: string | null;
+    regionCode: string;
+    innVerified: boolean;
+    createdAt: string;
+  };
+  reviews: { id: number; stars: number; text: string | null; createdAt: string; author: string | null; amountUzs: number }[];
+  more: { id: number; title: string; cover: string | null; fromPriceUzs: number | null }[];
+}
+
+/** Картинка услуги: «f:<id>» — загруженная продавцом (отдаёт api), иначе путь к статике Mini App. */
+export function imgSrc(ref: string | null | undefined): string | undefined {
+  if (!ref) return undefined;
+  return ref.startsWith('f:') ? `${API_URL}/v1/gigs/image/${ref.slice(2)}` : ref;
+}
+
+export interface MyGig {
+  id: number;
+  title: string;
+  cover: string | null;
+  active: boolean;
+  ordersCount: number;
+  categoryId: number | null;
+  fromPriceUzs: number | null;
+  packagesCount: number;
+  updatedAt: string;
+}
+
+export interface GigEditable {
+  id: number;
+  companyId: number;
+  categoryId: number | null;
+  title: string;
+  description: string;
+  gallery: string[];
+  packages: GigPackage[];
+  tags: string[];
+  active: boolean;
 }
 
 export interface MyRequest {
@@ -152,19 +241,54 @@ export interface Deal {
   amountUzs: number;
   leadTimeDays?: number;
   comment?: string | null;
-  request: { id: number; title: string | null; status: string };
-  supplier: { id: number; name: string; ratingAvg: number | null; trustLevel: number };
+  request: { id: number; title: string | null; status: string; gigId: number | null };
+  supplier: { id: number; name: string; ratingAvg: number | null; trustLevel: number; innVerified: boolean };
   buyer: { name: string | null; username: string | null; phone: string | null } | null;
+  payment: DealPayment;
   buyerConfirmed: boolean;
   supplierConfirmed: boolean;
   myReview: { stars: number; text: string | null } | null;
+  closedBy: string | null;
+  closeReason: string | null;
+  cancelledAt: string | null;
+  disputedAt: string | null;
+  canCancel: boolean;
+  canDispute: boolean;
   createdAt: string;
   completedAt: string | null;
 }
 
+export type PaymentStatus = 'none' | 'awaiting' | 'held' | 'payout_due' | 'paid_out' | 'refund_due' | 'refunded';
+
+export interface DealPayment {
+  status: PaymentStatus;
+  feePercent: number;
+  feeUzs: number;
+  paidAt: string | null;
+  settledAt: string | null;
+  // исполнитель
+  payoutUzs?: number;
+  // покупатель
+  quote?: { firstOrder: boolean; phoneNeeded: boolean; discountUzs: number; bonusUzs: number; payUzs: number } | null;
+  paidUzs?: number | null;
+  discountUzs?: number;
+  bonusUzs?: number;
+  payUrl?: string | null;
+}
+
+export interface TeamMember {
+  userId: number;
+  firstName: string | null;
+  username: string | null;
+  role: 'owner' | 'manager';
+  joinedAt: string;
+}
+
 export interface ChatItem {
   id: number;
-  requestId: number;
+  /** null — вопрос по услуге до заказа. */
+  requestId: number | null;
+  gigId: number | null;
   title: string | null;
   supplierCompanyId: number;
   supplierName: string;
@@ -272,6 +396,7 @@ export async function api<T>(method: string, path: string, body?: unknown, retry
 export const get = <T>(path: string) => api<T>('GET', path);
 export const post = <T>(path: string, body?: unknown) => api<T>('POST', path, body ?? {});
 export const patch = <T>(path: string, body: unknown) => api<T>('PATCH', path, body);
+export const del = <T>(path: string) => api<T>('DELETE', path);
 
 /** Загрузка файла: подписанная ссылка → PUT прямо в хранилище → подтверждение. */
 export async function uploadFile(file: File): Promise<number> {

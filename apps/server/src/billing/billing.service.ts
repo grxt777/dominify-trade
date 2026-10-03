@@ -1,7 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { auditLog, companies, invoices, memberships, moderationItems, offers, subscriptions, type Db } from '@dominify/db';
-import { GRACE_DAYS, PERIOD_DAYS, PLANS, type PlanCode } from '@dominify/shared';
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import { auditLog, companies, deals, invoices, memberships, moderationItems, offers, payments, requests, subscriptions, users, type Db } from '@dominify/db';
+import { formatUzs, GRACE_DAYS, PERIOD_DAYS, PLANS, type PlanCode } from '@dominify/shared';
+import { and, desc, eq, gte, lt, ne, or, sql } from 'drizzle-orm';
 import type { Config } from '../config';
 import { randomToken } from '../common/crypto';
 import { AppError, notFound } from '../common/http';
@@ -9,6 +9,19 @@ import { CONFIG, DB } from '../infra/tokens';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const fmtDate = (d: Date) => d.toISOString().slice(0, 10);
+
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+type PaidVia = 'bank_transfer' | 'payme' | 'click' | 'manual';
+type Invoice = typeof invoices.$inferSelect;
+export interface PaidResult {
+  invoice: Invoice;
+  activated: boolean;
+  until?: Date;
+  /** Счёт заказа: сделка после зачисления оплаты. */
+  deal?: typeof deals.$inferSelect;
+}
+export const PAYME_TIMEOUT_MS = 12 * 3600 * 1000;
+export const CLICK_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Тарифы, счета и подписки. Оплата идёт вне Mini App: банковский перевод по счёту
@@ -50,6 +63,24 @@ export class BillingService {
         ),
       );
     return r?.c ?? 0;
+  }
+
+  /**
+   * Откликов этого месяца с бесплатных компаний, отправленных людьми с тем же номером телефона.
+   * Без этого бесплатный лимит обходится созданием новых компаний.
+   */
+  async freeOffersThisMonthByPhone(phoneHash: string): Promise<number> {
+    const r = await this.db.execute<{ c: number }>(sql`
+      select count(*)::int as c
+      from offers o
+      join users u on u.id = o.author_user_id
+      where u.phone_hash = ${phoneHash}
+        and o.created_at >= date_trunc('month', now() at time zone 'Asia/Tashkent') at time zone 'Asia/Tashkent'
+        and not exists (
+          select 1 from subscriptions s
+          where s.company_id = o.supplier_company_id and s.plan_code <> 'free' and s.status <> 'expired'
+        )`);
+    return Number(r.rows[0]?.c ?? 0);
   }
 
   /** Экран «Тариф» в Mini App: что включено и до какого числа. Без цен и кнопок оплаты. */
@@ -115,6 +146,8 @@ export class BillingService {
     return this.db
       .select({
         id: invoices.id,
+        kind: invoices.kind,
+        dealId: invoices.dealId,
         companyId: invoices.companyId,
         companyName: companies.name,
         planCode: invoices.planCode,
@@ -137,50 +170,171 @@ export class BillingService {
    * Счёт оплачен: продлить подписку. Идемпотентно — повторный вызов для оплаченного счёта ничего не меняет.
    * Если тот же тариф ещё действует, новый период добавляется к концу текущего.
    */
-  async markPaid(invoiceId: number, via: 'bank_transfer' | 'payme' | 'click' | 'manual', staffUserId?: number) {
-    return this.db.transaction(async (tx) => {
-      const [inv] = await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).for('update');
-      if (!inv) throw notFound('Счёт');
-      if (inv.status === 'paid') return { invoice: inv, activated: false };
-      if (inv.status === 'cancelled') throw new AppError('cancelled', 'Счёт отменён');
+  async markPaid(invoiceId: number, via: PaidVia, staffUserId?: number) {
+    return this.db.transaction((tx) => this.applyPaid(tx, invoiceId, via, staffUserId)).then((r) => this.afterPaid(r));
+  }
 
-      const now = new Date();
-      const [sub] = await tx.select().from(subscriptions).where(eq(subscriptions.companyId, inv.companyId)).for('update');
-      const samePlanActive = sub && sub.planCode === inv.planCode && sub.status !== 'expired' && sub.periodEnd && sub.periodEnd > now;
-      const start = samePlanActive ? sub!.periodEnd! : now;
-      const end = new Date(start.getTime() + PERIOD_DAYS * inv.months * 86_400_000);
-
-      await tx.update(invoices).set({ status: 'paid', paidAt: now, paidVia: via }).where(eq(invoices.id, inv.id));
-      if (sub) {
-        await tx
-          .update(subscriptions)
-          .set({ planCode: inv.planCode, status: 'active', periodStart: samePlanActive ? sub.periodStart : now, periodEnd: end, source: via, remindedAt: null, updatedAt: now })
-          .where(eq(subscriptions.id, sub.id));
+  async afterPaid<R extends PaidResult>(r: R): Promise<R> {
+    if (r.deal) {
+      const d = r.deal;
+      const [req] = await this.db.select({ title: requests.title }).from(requests).where(eq(requests.id, d.requestId));
+      const payload = { dealId: d.id, requestId: d.requestId, title: req?.title ?? '', amount: formatUzs(d.amountUzs), payout: formatUzs(d.amountUzs - d.feeUzs) };
+      if (d.paymentStatus === 'held') {
+        await this.notifications.notifyCompany(d.supplierCompanyId, 'deal_paid', payload, { urgent: true });
+        await this.notifications.notify(d.buyerUserId, 'deal_paid_buyer', payload, { urgent: true });
       } else {
-        await tx.insert(subscriptions).values({ companyId: inv.companyId, planCode: inv.planCode, status: 'active', periodStart: now, periodEnd: end, source: via });
-      }
-      if (staffUserId) {
-        await tx.insert(auditLog).values({ staffUserId, action: 'invoice.paid', refType: 'invoice', refId: inv.id, data: { via } });
-      }
-      const [paid] = await tx.select().from(invoices).where(eq(invoices.id, inv.id));
-      return { invoice: paid, activated: true, until: end };
-    }).then(async (r) => {
-      if (r.activated && r.until) {
-        await this.notifications.notifyCompany(r.invoice.companyId, 'subscription_activated', {
-          plan: PLANS[r.invoice.planCode as PlanCode].name.ru,
-          until: fmtDate(r.until),
-        });
+        await this.db.insert(moderationItems).values({ kind: 'escrow_refund', refType: 'deal', refId: d.id, note: `Оплата пришла по закрытой сделке #${d.id}: вернуть покупателю` });
       }
       return r;
-    });
+    }
+    if (r.activated && r.until) {
+      await this.notifications.notifyCompany(r.invoice.companyId, 'subscription_activated', {
+        plan: PLANS[r.invoice.planCode as PlanCode].name.ru,
+        until: fmtDate(r.until),
+      });
+    }
+    return r;
+  }
+
+  /** Отметка оплаты внутри уже открытой транзакции: платёж провайдера и счёт меняются атомарно. */
+  async applyPaid(tx: Tx, invoiceId: number, via: PaidVia, staffUserId?: number): Promise<PaidResult> {
+    const [inv] = await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).for('update');
+    if (!inv) throw notFound('Счёт');
+    if (inv.status === 'paid') return { invoice: inv, activated: false, until: undefined };
+    if (inv.status === 'cancelled') throw new AppError('cancelled', 'Счёт отменён');
+    if ((via === 'bank_transfer' || via === 'manual') && (await this.paymentInFlight(tx, invoiceId))) {
+      throw new AppError('payment_pending', 'По счёту идёт оплата через Payme или Click. Дождитесь её завершения.', HttpStatus.CONFLICT);
+    }
+    if (inv.kind === 'deal') return this.applyDealPaid(tx, inv, via, staffUserId);
+    const planCode = inv.planCode as PlanCode;
+
+    const now = new Date();
+    const [sub] = await tx.select().from(subscriptions).where(eq(subscriptions.companyId, inv.companyId)).for('update');
+    const samePlanActive = sub && sub.planCode === inv.planCode && sub.status !== 'expired' && sub.periodEnd && sub.periodEnd > now;
+    const start = samePlanActive ? sub!.periodEnd! : now;
+    const end = new Date(start.getTime() + PERIOD_DAYS * inv.months * 86_400_000);
+
+    await tx.update(invoices).set({ status: 'paid', paidAt: now, paidVia: via }).where(eq(invoices.id, inv.id));
+    if (sub) {
+      await tx
+        .update(subscriptions)
+        .set({ planCode, status: 'active', periodStart: samePlanActive ? sub.periodStart : now, periodEnd: end, source: via, remindedAt: null, updatedAt: now })
+        .where(eq(subscriptions.id, sub.id));
+    } else {
+      await tx.insert(subscriptions).values({ companyId: inv.companyId, planCode, status: 'active', periodStart: now, periodEnd: end, source: via });
+    }
+    if (staffUserId) {
+      await tx.insert(auditLog).values({ staffUserId, action: 'invoice.paid', refType: 'invoice', refId: inv.id, data: { via } });
+    }
+    const [paid] = await tx.select().from(invoices).where(eq(invoices.id, inv.id));
+    return { invoice: paid, activated: true, until: end };
+  }
+
+  /**
+   * Покупатель оплатил заказ: деньги на счёте платформы до приёмки работы.
+   * Если сделку успели отменить, пока шла оплата, деньги сразу помечаются к возврату.
+   */
+  private async applyDealPaid(tx: Tx, inv: Invoice, via: PaidVia, staffUserId?: number): Promise<PaidResult> {
+    const now = new Date();
+    const [d] = await tx.select().from(deals).where(eq(deals.id, inv.dealId!)).for('update');
+    const open = d.status === 'active' || d.status === 'disputed';
+    await tx.update(invoices).set({ status: 'paid', paidAt: now, paidVia: via }).where(eq(invoices.id, inv.id));
+    const [deal] = await tx
+      .update(deals)
+      .set({
+        paymentStatus: open ? 'held' : 'refund_due',
+        paidAt: now,
+        escrow: true,
+        feeUzs: Math.round((d.amountUzs * this.cfg.ESCROW_FEE_PERCENT) / 100),
+      })
+      .where(eq(deals.id, d.id))
+      .returning();
+    if (staffUserId) {
+      await tx.insert(auditLog).values({ staffUserId, action: 'invoice.paid', refType: 'invoice', refId: inv.id, data: { via, dealId: d.id } });
+    }
+    const [paid] = await tx.select().from(invoices).where(eq(invoices.id, inv.id));
+    return { invoice: paid, activated: false, deal };
+  }
+
+  /** Неоплаченный счёт заказа больше не нужен (сделку отменили): бонусы возвращаются покупателю. */
+  async cancelDealInvoiceTx(tx: Tx, inv: Invoice, buyerUserId: number) {
+    await tx.update(invoices).set({ status: 'cancelled' }).where(eq(invoices.id, inv.id));
+    if (inv.bonusUzs > 0) await tx.update(users).set({ bonusUzs: sql`${users.bonusUzs} + ${inv.bonusUzs}` }).where(eq(users.id, buyerUserId));
+  }
+
+  /**
+   * Платёжная система вернула деньги за оплаченный заказ (Payme CancelTransaction после проведения).
+   * Разрешено, пока деньги ещё у платформы: удержаны или ждут возврата. После выплаты исполнителю — нельзя.
+   */
+  async refundDealByProvider(tx: Tx, invoiceId: number): Promise<boolean> {
+    const inv = await this.lockInvoice(tx, invoiceId);
+    if (!inv || inv.kind !== 'deal' || !inv.dealId) return false;
+    const [d] = await tx.select().from(deals).where(eq(deals.id, inv.dealId)).for('update');
+    if (!['held', 'refund_due', 'refunded'].includes(d.paymentStatus)) return false;
+    if (d.paymentStatus !== 'refunded') {
+      await tx.update(deals).set({ paymentStatus: 'refunded', settledAt: new Date() }).where(eq(deals.id, d.id));
+    }
+    return true;
   }
 
   async cancelInvoice(invoiceId: number, staffUserId: number) {
-    const [inv] = await this.db.select().from(invoices).where(eq(invoices.id, invoiceId));
-    if (!inv) throw notFound('Счёт');
-    if (inv.status === 'paid') throw new AppError('paid', 'Оплаченный счёт отменить нельзя');
-    await this.db.update(invoices).set({ status: 'cancelled' }).where(eq(invoices.id, invoiceId));
-    await this.db.insert(auditLog).values({ staffUserId, action: 'invoice.cancel', refType: 'invoice', refId: invoiceId, data: {} });
+    await this.db.transaction(async (tx) => {
+      const [inv] = await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).for('update');
+      if (!inv) throw notFound('Счёт');
+      if (inv.status === 'paid') throw new AppError('paid', 'Оплаченный счёт отменить нельзя');
+      if (await this.paymentInFlight(tx, invoiceId)) {
+        throw new AppError('payment_pending', 'По счёту идёт оплата через Payme или Click. Дождитесь её завершения.', HttpStatus.CONFLICT);
+      }
+      if (inv.kind === 'deal' && inv.dealId) {
+        const [d] = await tx.select().from(deals).where(eq(deals.id, inv.dealId));
+        await this.cancelDealInvoiceTx(tx, inv, d.buyerUserId);
+        await tx.update(deals).set({ paymentStatus: 'none' }).where(and(eq(deals.id, d.id), eq(deals.paymentStatus, 'awaiting')));
+      } else {
+        await tx.update(invoices).set({ status: 'cancelled' }).where(eq(invoices.id, invoiceId));
+      }
+      await tx.insert(auditLog).values({ staffUserId, action: 'invoice.cancel', refType: 'invoice', refId: invoiceId, data: {} });
+    });
+  }
+
+  /** Блокирует строку счёта до конца транзакции: Payme, Click и админка работают со счётом по очереди. */
+  async lockInvoice(tx: Tx, invoiceId: number) {
+    const [inv] = await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).for('update');
+    return inv ?? null;
+  }
+
+  /**
+   * Есть ли по счёту незавершённая транзакция в любой платёжной системе (кроме указанной).
+   * Payme держит транзакцию в состоянии 1 до 12 часов, Click между Prepare и Complete — минуты.
+   * Пока такая транзакция жива, вторую не открываем: иначе один счёт оплатят дважды.
+   */
+  async paymentInFlight(tx: Tx, invoiceId: number, except?: { provider: 'payme' | 'click'; txnId: string }): Promise<boolean> {
+    const now = Date.now();
+    const [row] = await tx
+      .select({ id: payments.id })
+      .from(payments)
+      .where(
+        and(
+          eq(payments.invoiceId, invoiceId),
+          eq(payments.state, 1),
+          or(
+            and(eq(payments.provider, 'payme'), gte(payments.providerTime, now - PAYME_TIMEOUT_MS)),
+            and(eq(payments.provider, 'click'), gte(payments.providerTime, now - CLICK_TIMEOUT_MS)),
+          ),
+          except ? sql`not (${payments.provider} = ${except.provider} and ${payments.providerTxnId} = ${except.txnId})` : undefined,
+        ),
+      )
+      .limit(1);
+    return !!row;
+  }
+
+  /** Есть ли по счёту успешная транзакция другой платёжной системы. */
+  async paidElsewhere(tx: Tx, invoiceId: number, paymentId: number): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: payments.id })
+      .from(payments)
+      .where(and(eq(payments.invoiceId, invoiceId), eq(payments.state, 2), ne(payments.id, paymentId)))
+      .limit(1);
+    return !!row;
   }
 
   /** Ежедневная задача: напоминания, grace-период и перевод на бесплатный тариф. */

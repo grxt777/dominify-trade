@@ -7,6 +7,7 @@ import IORedis from 'ioredis';
 import type { Db } from '@dominify/db';
 import { configureBot, createBot } from './bot/bot';
 import { loadConfig } from './config';
+import { initMonitoring } from './infra/monitoring';
 import { FilesService } from './files/files';
 import { DB, REDIS } from './infra/tokens';
 import { BotModule } from './modules';
@@ -20,6 +21,7 @@ import { UsersService } from './users/users.service';
  */
 async function bootstrap() {
   const cfg = loadConfig();
+  initMonitoring(cfg, 'bot');
   const logger = new ConsoleLogger({ json: cfg.NODE_ENV === 'production', prefix: 'bot' });
   const app = await NestFactory.createApplicationContext(BotModule, { logger });
   const log = new Logger('Bot');

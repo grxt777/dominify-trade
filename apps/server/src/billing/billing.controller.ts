@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Inject, Param, Post, Query, Res } from '@nestjs/common';
-import { companies, type Db } from '@dominify/db';
+import { companies, deals, requests, type Db } from '@dominify/db';
 import { formatUzs, PLANS, uzsToTiyin, type PlanCode } from '@dominify/shared';
 import { eq } from 'drizzle-orm';
 import type { Response } from 'express';
@@ -91,7 +91,7 @@ export class PayPageController {
       return;
     }
     const [c] = await this.db.select({ name: companies.name }).from(companies).where(eq(companies.id, inv.companyId));
-    const plan = PLANS[inv.planCode as PlanCode];
+    const isDeal = inv.kind === 'deal';
     const back = `${this.cfg.PUBLIC_API_URL}/pay/${token}`;
     const buttons: string[] = [];
     if (inv.status === 'issued' && this.cfg.PAYME_MERCHANT_ID) {
@@ -110,16 +110,42 @@ export class PayPageController {
     }
     const status =
       inv.status === 'paid'
-        ? '<p class="ok">Счёт оплачен. Тариф активирован.</p>'
+        ? isDeal
+          ? "<p class=\"ok\">Оплачено. Деньги хранятся у Dominify до приёмки работы.<br>To'landi. Pul ish qabul qilinguncha Dominify'da saqlanadi.</p>"
+          : '<p class="ok">Счёт оплачен. Тариф активирован.</p>'
         : inv.status === 'cancelled'
-          ? '<p class="bad">Счёт отменён.</p>'
+          ? "<p class=\"bad\">Счёт отменён. / Hisob bekor qilingan.</p>"
           : '';
-    const requisites = this.cfg.BANK_REQUISITES
-      ? `<h2>Оплата переводом</h2><pre>${esc(this.cfg.BANK_REQUISITES)}</pre><p class="muted">В назначении платежа укажите: «Оплата по счёту №${inv.id}».</p>`
-      : '';
+    const requisites =
+      this.cfg.BANK_REQUISITES && !isDeal
+        ? `<h2>Оплата переводом</h2><pre>${esc(this.cfg.BANK_REQUISITES)}</pre><p class="muted">В назначении платежа укажите: «Оплата по счёту №${inv.id}».</p>`
+        : '';
+    let details: string;
+    if (isDeal) {
+      const [d] = await this.db
+        .select({ amountUzs: deals.amountUzs, title: requests.title })
+        .from(deals)
+        .innerJoin(requests, eq(requests.id, deals.requestId))
+        .where(eq(deals.id, inv.dealId!));
+      const rows = [
+        `<dt>Исполнитель</dt><dd>${esc(c?.name ?? '')}</dd>`,
+        `<dt>Заказ</dt><dd>${esc(d?.title ?? `№${inv.dealId}`)}</dd>`,
+        `<dt>Сумма заказа</dt><dd>${formatUzs(d?.amountUzs ?? inv.amountUzs)} сум</dd>`,
+        inv.discountUzs ? `<dt>Скидка на первый заказ</dt><dd class="ok">−${formatUzs(inv.discountUzs)} сум</dd>` : '',
+        inv.bonusUzs ? `<dt>Бонусы</dt><dd class="ok">−${formatUzs(inv.bonusUzs)} сум</dd>` : '',
+      ];
+      details = `<dl>${rows.join('')}</dl>
+<div class="guard"><b>🛡 Безопасная сделка · Xavfsiz to'lov</b><br>Деньги хранятся у Dominify и переводятся исполнителю только после того, как вы подтвердите выполнение. Если работа не сделана — вернём.<br><span class="muted">Pul ishni qabul qilmaguningizcha Dominify'da saqlanadi. Ish bajarilmasa — qaytariladi.</span></div>`;
+      if (inv.status === 'issued' && !buttons.length) {
+        buttons.push('<p class="muted">Онлайн-оплата скоро будет доступна. / Onlayn to\'lov tez orada ishga tushadi.</p>');
+      }
+    } else {
+      const plan = PLANS[inv.planCode as PlanCode];
+      details = `<dl><dt>Компания</dt><dd>${esc(c?.name ?? '')}</dd><dt>Тариф</dt><dd>${esc(plan.name.ru)}</dd><dt>Период</dt><dd>${inv.months} × 30 дней</dd></dl>`;
+    }
     res.type('html').send(`<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Счёт №${inv.id} · Dominify Trade</title>
+<title>${isDeal ? `Оплата заказа №${inv.dealId}` : `Счёт №${inv.id}`} · Dominify Trade</title>
 <style>
 :root{--bg:#F2F4F6;--card:#fff;--ink:#12151A;--muted:#5A6472;--line:#D6DCE3;--accent:#0087B8}
 @media (prefers-color-scheme:dark){:root{--bg:#0E1115;--card:#161A20;--ink:#E6EAEF;--muted:#97A2B0;--line:#2A313A;--accent:#38BDEB}}
@@ -130,9 +156,10 @@ dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:16px 0}dt{col
 .sum{font-size:28px;font-weight:700;margin:8px 0 16px}.btn{display:block;text-align:center;padding:14px;border-radius:12px;text-decoration:none;font-weight:600;margin-top:10px;color:#fff}
 .payme{background:#00B2B8}.click{background:#0074E4}pre{white-space:pre-wrap;background:var(--bg);padding:12px;border-radius:10px;font:14px/1.5 ui-monospace,monospace}
 .ok{color:#1F8A5B;font-weight:600}.bad{color:#C8006F;font-weight:600}
+.guard{background:rgba(31,138,91,.1);border-radius:12px;padding:12px 14px;font-size:14px;margin:0 0 12px}
 </style></head><body><main>
-<h1>Счёт №${inv.id}</h1><p class="muted">Dominify Trade</p>
-<dl><dt>Компания</dt><dd>${esc(c?.name ?? '')}</dd><dt>Тариф</dt><dd>${esc(plan.name.ru)}</dd><dt>Период</dt><dd>${inv.months} × 30 дней</dd></dl>
+<h1>${isDeal ? `Оплата заказа №${inv.dealId}` : `Счёт №${inv.id}`}</h1><p class="muted">Dominify Trade</p>
+${details}
 <div class="sum">${formatUzs(inv.amountUzs)} сум</div>
 ${status}${buttons.join('')}${requisites}
 </main></body></html>`);

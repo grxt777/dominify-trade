@@ -5,7 +5,7 @@ import { and, between, eq } from 'drizzle-orm';
 import { timingSafeEqual } from 'node:crypto';
 import type { Config } from '../config';
 import { CONFIG, DB } from '../infra/tokens';
-import { BillingService } from './billing.service';
+import { BillingService, PAYME_TIMEOUT_MS } from './billing.service';
 
 /** Коды ошибок Merchant API Payme. */
 export const PaymeErr = {
@@ -20,7 +20,7 @@ export const PaymeErr = {
   accountBusy: -31051,
 } as const;
 
-const TIMEOUT_MS = 12 * 3600 * 1000;
+const TIMEOUT_MS = PAYME_TIMEOUT_MS;
 
 type Msg = { ru: string; uz: string; en: string };
 const MSG: Record<string, Msg> = {
@@ -118,7 +118,7 @@ export class PaymeService {
         receipt_type: 0,
         items: [
           {
-            title: `Тариф «${PLANS[inv.planCode as PlanCode].name.ru}», ${inv.months} мес.`,
+            title: inv.kind === 'deal' ? `Оплата заказа №${inv.dealId}` : `Тариф «${PLANS[inv.planCode as PlanCode].name.ru}», ${inv.months} мес.`,
             price: inv.amountUzs * 100,
             count: 1,
             code: this.cfg.PAYME_IKPU_CODE,
@@ -152,17 +152,18 @@ export class PaymeService {
       return { create_time: Number(existing.providerTime), transaction: String(existing.id), state: 1 };
     }
     await this.checkPerform(p);
-    const inv = await this.invoiceFor(p);
-    // По счёту может быть только одна активная транзакция.
-    const [active] = await this.db
-      .select({ id: payments.id })
-      .from(payments)
-      .where(and(eq(payments.invoiceId, inv.id), eq(payments.provider, 'payme'), eq(payments.state, 1)));
-    if (active) throw new PaymeError(PaymeErr.accountBusy, MSG.accountBusy, 'invoice_id');
-    const [row] = await this.db
-      .insert(payments)
-      .values({ invoiceId: inv.id, provider: 'payme', providerTxnId: txnId, amountTiyin: Number(p.amount), state: 1, providerTime: time })
-      .returning();
+    const inv0 = await this.invoiceFor(p);
+    const row = await this.db.transaction(async (tx) => {
+      const inv = await this.billing.lockInvoice(tx, inv0.id);
+      if (!inv || inv.status !== 'issued') throw new PaymeError(PaymeErr.accountBusy, MSG.accountBusy, 'invoice_id');
+      // По счёту может быть только одна активная транзакция — с учётом Click.
+      if (await this.billing.paymentInFlight(tx, inv.id)) throw new PaymeError(PaymeErr.accountBusy, MSG.accountBusy, 'invoice_id');
+      const [r] = await tx
+        .insert(payments)
+        .values({ invoiceId: inv.id, provider: 'payme', providerTxnId: txnId, amountTiyin: Number(p.amount), state: 1, providerTime: time })
+        .returning();
+      return r;
+    });
     return { create_time: time, transaction: String(row.id), state: 1 };
   }
 
@@ -176,8 +177,18 @@ export class PaymeService {
       throw new PaymeError(PaymeErr.cantPerform, MSG.cantPerform);
     }
     const performTime = Date.now();
-    await this.db.update(payments).set({ state: 2, performTime }).where(eq(payments.id, row.id));
-    await this.billing.markPaid(row.invoiceId, 'payme');
+    const paid = await this.db.transaction(async (tx) => {
+      const inv = await this.billing.lockInvoice(tx, row.invoiceId);
+      // Счёт успели оплатить через Click или отменить: списывать деньги второй раз нельзя.
+      if (!inv || inv.status === 'cancelled' || (await this.billing.paidElsewhere(tx, row.invoiceId, row.id))) {
+        await tx.update(payments).set({ state: -1, reason: 5, cancelTime: Date.now() }).where(eq(payments.id, row.id));
+        return null;
+      }
+      await tx.update(payments).set({ state: 2, performTime }).where(eq(payments.id, row.id));
+      return this.billing.applyPaid(tx, row.invoiceId, 'payme');
+    });
+    if (!paid) throw new PaymeError(PaymeErr.cantPerform, MSG.cantPerform);
+    await this.billing.afterPaid(paid);
     return { transaction: String(row.id), perform_time: performTime, state: 2 };
   }
 
@@ -190,8 +201,15 @@ export class PaymeService {
       return { transaction: String(row.id), cancel_time: cancelTime, state: -1 };
     }
     if (row.state === 2) {
-      // Подписка уже активирована: отмена только вручную через поддержку.
-      throw new PaymeError(PaymeErr.cantCancel, MSG.cantCancel);
+      // Оплату заказа можно вернуть, пока деньги не выплачены исполнителю. Подписку — только через поддержку.
+      const cancelTime = Date.now();
+      const refunded = await this.db.transaction(async (tx) => {
+        if (!(await this.billing.refundDealByProvider(tx, row.invoiceId))) return false;
+        await tx.update(payments).set({ state: -2, reason: Number(p.reason) || null, cancelTime }).where(eq(payments.id, row.id));
+        return true;
+      });
+      if (!refunded) throw new PaymeError(PaymeErr.cantCancel, MSG.cantCancel);
+      return { transaction: String(row.id), cancel_time: cancelTime, state: -2 };
     }
     return { transaction: String(row.id), cancel_time: Number(row.cancelTime ?? 0), state: row.state };
   }

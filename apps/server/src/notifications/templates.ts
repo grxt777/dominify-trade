@@ -20,7 +20,23 @@ export type NotificationType =
   | 'subscription_expiring'
   | 'subscription_grace'
   | 'subscription_expired'
-  | 'phone_saved';
+  | 'phone_saved'
+  | 'team_joined'
+  | 'deal_cancelled'
+  | 'deal_disputed'
+  | 'deal_resolved'
+  | 'deal_reminder'
+  | 'request_reopened'
+  | 'deal_paid'
+  | 'deal_paid_buyer'
+  | 'deal_payout_due'
+  | 'deal_payout_sent'
+  | 'deal_refund_due'
+  | 'deal_refund_sent'
+  | 'referral_reward'
+  | 'gig_reminder'
+  | 'draft_reminder'
+  | 'reorder_nudge';
 
 export interface Button {
   text: string;
@@ -41,7 +57,20 @@ const s = (v: unknown) => String(v ?? '');
 const money = (v: unknown) => formatUzs(Number(v ?? 0));
 
 /** Срочные типы игнорируют тихие часы. */
-export const URGENT: NotificationType[] = ['request_parsed', 'request_question', 'phone_saved', 'chosen', 'message'];
+export const URGENT: NotificationType[] = [
+  'request_parsed',
+  'request_question',
+  'phone_saved',
+  'chosen',
+  'message',
+  'deal_cancelled',
+  'deal_disputed',
+  'deal_paid',
+  'deal_paid_buyer',
+  'deal_refund_due',
+];
+
+const openDeal = (p: P, l: Lang): Button => ({ text: { ru: 'Открыть сделку', uz: 'Bitimni ochish', uzc: 'Битимни очиш' }[l], route: `deal_${p.dealId}` });
 
 const T: Record<NotificationType, (p: P, l: Lang) => Rendered> = {
   request_parsed: (p, l) => ({
@@ -132,7 +161,9 @@ const T: Record<NotificationType, (p: P, l: Lang) => Rendered> = {
     buttons: [],
   }),
   message: (p, l) => ({
-    text: `<b>${s(p.from)}</b> ${{ ru: 'пишет по заявке', uz: "so'rov bo'yicha yozmoqda", uzc: 'сўров бўйича ёзмоқда' }[l]} #${s(p.requestId)}:\n${s(p.text)}`,
+    text: p.requestId
+      ? `<b>${s(p.from)}</b> ${{ ru: 'пишет по заявке', uz: "so'rov bo'yicha yozmoqda", uzc: 'сўров бўйича ёзмоқда' }[l]} #${s(p.requestId)}:\n${s(p.text)}`
+      : `<b>${s(p.from)}</b> ${{ ru: 'пишет об услуге', uz: 'xizmat haqida yozmoqda', uzc: 'хизмат ҳақида ёзмоқда' }[l]} «${s(p.gigTitle)}»:\n${s(p.text)}`,
     buttons: [{ text: { ru: 'Ответить', uz: 'Javob berish', uzc: 'Жавоб бериш' }[l], route: `chat_${p.chatId}` }],
   }),
   supplier_reminder: (p, l) => ({
@@ -198,6 +229,134 @@ const T: Record<NotificationType, (p: P, l: Lang) => Rendered> = {
       uzc: 'Раҳмат, рақам тасдиқланди. Иловага қайтишингиз мумкин.',
     }[l],
     buttons: [{ text: { ru: 'Открыть приложение', uz: 'Ilovani ochish', uzc: 'Иловани очиш' }[l], route: 'home' }],
+  }),
+  team_joined: (p, l) => ({
+    text: {
+      ru: `${s(p.name)} присоединился к вашей команде и теперь видит заявки компании.`,
+      uz: `${s(p.name)} jamoangizga qo'shildi va endi kompaniya so'rovlarini ko'radi.`,
+      uzc: `${s(p.name)} жамоангизга қўшилди ва энди компания сўровларини кўради.`,
+    }[l],
+    buttons: [{ text: { ru: 'Команда', uz: 'Jamoa', uzc: 'Жамоа' }[l], route: 'profile' }],
+  }),
+  deal_cancelled: (p, l) => ({
+    text: {
+      ru: `Сделка по заявке #${s(p.requestId)} отменена. Причина: ${s(p.reason) || '—'}`,
+      uz: `#${s(p.requestId)} so'rov bo'yicha bitim bekor qilindi. Sabab: ${s(p.reason) || '—'}`,
+      uzc: `#${s(p.requestId)} сўров бўйича битим бекор қилинди. Сабаб: ${s(p.reason) || '—'}`,
+    }[l],
+    buttons: [{ text: { ru: 'Открыть', uz: 'Ochish', uzc: 'Очиш' }[l], route: `deal_${p.dealId}` }],
+  }),
+  deal_disputed: (p, l) => ({
+    text: {
+      ru: `По сделке #${s(p.dealId)} (заявка #${s(p.requestId)}) открыт спор. Модератор свяжется с обеими сторонами в течение рабочего дня.`,
+      uz: `#${s(p.dealId)} bitim (#${s(p.requestId)} so'rov) bo'yicha nizo ochildi. Moderator ish kuni davomida ikkala tomon bilan bog'lanadi.`,
+      uzc: `#${s(p.dealId)} битим (#${s(p.requestId)} сўров) бўйича низо очилди. Модератор иш куни давомида иккала томон билан боғланади.`,
+    }[l],
+    buttons: [{ text: { ru: 'Открыть сделку', uz: 'Bitimni ochish', uzc: 'Битимни очиш' }[l], route: `deal_${p.dealId}` }],
+  }),
+  deal_resolved: (p, l) => ({
+    text: {
+      ru: `Спор по сделке #${s(p.dealId)} рассмотрен. Решение: ${s(p.outcome)}. ${s(p.note)}`,
+      uz: `#${s(p.dealId)} bitim bo'yicha nizo ko'rib chiqildi. Qaror: ${s(p.outcome)}. ${s(p.note)}`,
+      uzc: `#${s(p.dealId)} битим бўйича низо кўриб чиқилди. Қарор: ${s(p.outcome)}. ${s(p.note)}`,
+    }[l],
+    buttons: [{ text: { ru: 'Открыть сделку', uz: 'Bitimni ochish', uzc: 'Битимни очиш' }[l], route: `deal_${p.dealId}` }],
+  }),
+  deal_reminder: (p, l) => ({
+    text: {
+      ru: `Как продвигается сделка по заявке #${s(p.requestId)} «${s(p.title)}»? Когда всё будет готово, отметьте её выполненной. Если что-то пошло не так, отмените сделку или откройте спор.`,
+      uz: `#${s(p.requestId)} «${s(p.title)}» bitimi qanday ketyapti? Tayyor bo'lsa, bajarildi deb belgilang. Muammo bo'lsa, bekor qiling yoki nizo oching.`,
+      uzc: `#${s(p.requestId)} «${s(p.title)}» битими қандай кетяпти? Тайёр бўлса, бажарилди деб белгиланг. Муаммо бўлса, бекор қилинг ёки низо очинг.`,
+    }[l],
+    buttons: [{ text: { ru: 'Открыть сделку', uz: 'Bitimni ochish', uzc: 'Битимни очиш' }[l], route: `deal_${p.dealId}` }],
+  }),
+  request_reopened: (p, l) => ({
+    text: {
+      ru: `Заявка #${s(p.requestId)} «${s(p.title)}» снова открыта: исполнитель не выбран. Если ваш отклик ещё актуален, покупатель может выбрать вас.`,
+      uz: `#${s(p.requestId)} «${s(p.title)}» so'rov yana ochildi. Taklifingiz hali dolzarb bo'lsa, xaridor sizni tanlashi mumkin.`,
+      uzc: `#${s(p.requestId)} «${s(p.title)}» сўров яна очилди. Таклифингиз ҳали долзарб бўлса, харидор сизни танлаши мумкин.`,
+    }[l],
+    buttons: [{ text: { ru: 'Открыть заявку', uz: "So'rovni ochish", uzc: 'Сўровни очиш' }[l], route: `req_${p.requestId}` }],
+  }),
+  deal_paid: (p, l) => ({
+    text: {
+      ru: `💰 Покупатель оплатил заказ «${s(p.title)}» — ${s(p.amount)} сум. Деньги хранятся у Dominify и придут вам после приёмки работы (к выплате ${s(p.payout)} сум). Можно приступать.`,
+      uz: `💰 Mijoz «${s(p.title)}» buyurtmasini to'ladi — ${s(p.amount)} so'm. Pul Dominify'da saqlanadi va ish qabul qilingach sizga o'tkaziladi (${s(p.payout)} so'm). Ishni boshlashingiz mumkin.`,
+      uzc: `💰 Мижоз «${s(p.title)}» буюртмасини тўлади — ${s(p.amount)} сўм. Пул Dominify'да сақланади ва иш қабул қилингач сизга ўтказилади (${s(p.payout)} сўм). Ишни бошлашингиз мумкин.`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  deal_paid_buyer: (p, l) => ({
+    text: {
+      ru: `✅ Оплата получена. Деньги в безопасности: исполнитель получит их только после того, как вы подтвердите выполнение заказа «${s(p.title)}».`,
+      uz: `✅ To'lov qabul qilindi. Pulingiz xavfsiz: ijrochi uni faqat siz «${s(p.title)}» buyurtmasi bajarilganini tasdiqlaganingizdan keyin oladi.`,
+      uzc: `✅ Тўлов қабул қилинди. Пулингиз хавфсиз: ижрочи уни фақат сиз «${s(p.title)}» буюртмаси бажарилганини тасдиқлаганингиздан кейин олади.`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  deal_payout_due: (p, l) => ({
+    text: {
+      ru: `Заказ #${s(p.dealId)} принят покупателем. Выплата ${s(p.payout)} сум поступит на ваш счёт в течение 1–2 рабочих дней.`,
+      uz: `#${s(p.dealId)} buyurtma mijoz tomonidan qabul qilindi. ${s(p.payout)} so'm 1–2 ish kunida hisobingizga o'tkaziladi.`,
+      uzc: `#${s(p.dealId)} буюртма мижоз томонидан қабул қилинди. ${s(p.payout)} сўм 1–2 иш кунида ҳисобингизга ўтказилади.`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  deal_payout_sent: (p, l) => ({
+    text: {
+      ru: `Выплата по заказу #${s(p.dealId)} отправлена: ${s(p.payout)} сум. Спасибо за работу!`,
+      uz: `#${s(p.dealId)} buyurtma bo'yicha to'lov yuborildi: ${s(p.payout)} so'm. Ishingiz uchun rahmat!`,
+      uzc: `#${s(p.dealId)} буюртма бўйича тўлов юборилди: ${s(p.payout)} сўм. Ишингиз учун раҳмат!`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  deal_refund_due: (p, l) => ({
+    text: {
+      ru: `Сделка #${s(p.dealId)} отменена. Деньги вернутся на вашу карту в течение 1–3 рабочих дней.`,
+      uz: `#${s(p.dealId)} bitim bekor qilindi. Pulingiz 1–3 ish kunida kartangizga qaytariladi.`,
+      uzc: `#${s(p.dealId)} битим бекор қилинди. Пулингиз 1–3 иш кунида картангизга қайтарилади.`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  deal_refund_sent: (p, l) => ({
+    text: {
+      ru: `Деньги за заказ #${s(p.dealId)} возвращены.`,
+      uz: `#${s(p.dealId)} buyurtma uchun pul qaytarildi.`,
+      uzc: `#${s(p.dealId)} буюртма учун пул қайтарилди.`,
+    }[l],
+    buttons: [openDeal(p, l)],
+  }),
+  referral_reward: (p, l) => ({
+    text: {
+      ru: `🎁 ${s(p.name) || 'Ваш друг'} сделал первый заказ — вам начислено ${s(p.bonus)} сум бонусов. Ими можно оплатить следующий заказ.`,
+      uz: `🎁 ${s(p.name) || "Do'stingiz"} birinchi buyurtmasini berdi — sizga ${s(p.bonus)} so'm bonus berildi. Keyingi buyurtmani shu bilan to'lashingiz mumkin.`,
+      uzc: `🎁 ${s(p.name) || 'Дўстингиз'} биринчи буюртмасини берди — сизга ${s(p.bonus)} сўм бонус берилди. Кейинги буюртмани шу билан тўлашингиз мумкин.`,
+    }[l],
+    buttons: [{ text: { ru: 'Пригласить ещё', uz: 'Yana taklif qilish', uzc: 'Яна таклиф қилиш' }[l], route: 'invite' }],
+  }),
+  gig_reminder: (p, l) => ({
+    text: {
+      ru: `Вы смотрели услугу «${s(p.title)}» от ${s(p.seller)}${p.price ? ` — от ${money(p.price)} сум` : ''}. Заказ займёт минуту, а оплата хранится у Dominify до приёмки работы.`,
+      uz: `Siz ${s(p.seller)}ning «${s(p.title)}» xizmatini ko'rgan edingiz${p.price ? ` — ${money(p.price)} so'mdan` : ''}. Buyurtma bir daqiqa oladi, to'lov esa ish qabul qilinguncha Dominify'da saqlanadi.`,
+      uzc: `Сиз ${s(p.seller)}нинг «${s(p.title)}» хизматини кўрган эдингиз${p.price ? ` — ${money(p.price)} сўмдан` : ''}. Буюртма бир дақиқа олади, тўлов эса иш қабул қилингунча Dominify'да сақланади.`,
+    }[l],
+    buttons: [{ text: { ru: 'Посмотреть снова', uz: "Qayta ko'rish", uzc: 'Қайта кўриш' }[l], route: `gig_${p.gigId}` }],
+  }),
+  draft_reminder: (p, l) => ({
+    text: {
+      ru: `Заявка «${s(p.title) || `#${s(p.requestId)}`}» так и не отправлена исполнителям. Отправьте — первые предложения обычно приходят в течение часа.`,
+      uz: `«${s(p.title) || `#${s(p.requestId)}`}» so'rovi hali ijrochilarga yuborilmadi. Yuboring — birinchi takliflar odatda bir soat ichida keladi.`,
+      uzc: `«${s(p.title) || `#${s(p.requestId)}`}» сўрови ҳали ижрочиларга юборилмади. Юборинг — биринчи таклифлар одатда бир соат ичида келади.`,
+    }[l],
+    buttons: [{ text: { ru: 'Завершить заявку', uz: "So'rovni yakunlash", uzc: 'Сўровни якунлаш' }[l], route: `req_${p.requestId}` }],
+  }),
+  reorder_nudge: (p, l) => ({
+    text: {
+      ru: `Месяц назад «${s(p.seller)}» выполнил ваш заказ «${s(p.title)}». Нужно повторить или что-то новое? Закажите в пару касаний.`,
+      uz: `Bir oy oldin «${s(p.seller)}» «${s(p.title)}» buyurtmangizni bajargan edi. Takrorlash yoki yangi narsa kerakmi? Bir necha bosishda buyurtma bering.`,
+      uzc: `Бир ой олдин «${s(p.seller)}» «${s(p.title)}» буюртмангизни бажарган эди. Такрорлаш ёки янги нарса керакми? Бир неча босишда буюртма беринг.`,
+    }[l],
+    buttons: [{ text: { ru: 'Заказать снова', uz: 'Yana buyurtma berish', uzc: 'Яна буюртма бериш' }[l], route: p.gigId ? `gig_${p.gigId}` : 'new' }],
   }),
 };
 

@@ -13,6 +13,8 @@ import { ErrorFilter } from './common/http';
 import { CompaniesController, CompaniesService } from './companies/companies';
 import { DealsController, DealsService } from './deals/deals';
 import { FilesController, FilesService } from './files/files';
+import { GigsController, GigsService } from './gigs/gigs';
+import { GrowthService } from './growth/growth';
 import { HealthController } from './health';
 import { InfraModule } from './infra/infra.module';
 import { MatchingService } from './matching/matching.service';
@@ -43,6 +45,8 @@ const services = [
   ClickService,
   NotificationsService,
   FilesService,
+  GigsService,
+  GrowthService,
 ];
 
 /** Бизнес-логика без HTTP: общая для api, бота и воркера. */
@@ -61,6 +65,7 @@ export class CoreModule {}
     MeController,
     CatalogController,
     CompaniesController,
+    GigsController,
     RequestsController,
     OffersController,
     DealsController,

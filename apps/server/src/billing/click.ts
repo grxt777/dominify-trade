@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { payments, type Db } from '@dominify/db';
 import { and, eq } from 'drizzle-orm';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Config } from '../config';
 import { CONFIG, DB } from '../infra/tokens';
 import { BillingService } from './billing.service';
@@ -60,33 +60,45 @@ export class ClickService {
     return { click_trans_id: p.click_trans_id, merchant_trans_id: p.merchant_trans_id, error, error_note: note, ...extra };
   }
 
+  private signOk(p: ClickParams): boolean {
+    if (!this.cfg.CLICK_SECRET_KEY || typeof p.sign_string !== 'string') return false;
+    if (this.cfg.CLICK_SERVICE_ID && String(p.service_id) !== String(this.cfg.CLICK_SERVICE_ID)) return false;
+    const expected = Buffer.from(clickSign(p, this.cfg.CLICK_SECRET_KEY));
+    const got = Buffer.from(p.sign_string.toLowerCase());
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  }
+
   async prepare(p: ClickParams) {
     if (p.action !== '0') return this.reply(p, ClickErr.action, 'Action not found');
-    if (!this.cfg.CLICK_SECRET_KEY || clickSign(p, this.cfg.CLICK_SECRET_KEY) !== p.sign_string) return this.reply(p, ClickErr.sign, 'SIGN CHECK FAILED');
-    const inv = await this.billing.invoiceById(Number(p.merchant_trans_id));
-    if (!inv) return this.reply(p, ClickErr.notFound, 'Invoice not found');
-    if (inv.status === 'paid') return this.reply(p, ClickErr.alreadyPaid, 'Already paid');
-    if (inv.status === 'cancelled') return this.reply(p, ClickErr.cancelled, 'Transaction cancelled');
-    if (Math.round(Number(p.amount) * 100) !== inv.amountUzs * 100) return this.reply(p, ClickErr.amount, 'Incorrect parameter amount');
+    if (!this.signOk(p)) return this.reply(p, ClickErr.sign, 'SIGN CHECK FAILED');
+    const inv0 = await this.billing.invoiceById(Number(p.merchant_trans_id));
+    if (!inv0) return this.reply(p, ClickErr.notFound, 'Invoice not found');
+    if (Math.round(Number(p.amount) * 100) !== inv0.amountUzs * 100) return this.reply(p, ClickErr.amount, 'Incorrect parameter amount');
 
-    const [existing] = await this.db
-      .select()
-      .from(payments)
-      .where(and(eq(payments.provider, 'click'), eq(payments.providerTxnId, p.click_trans_id)));
-    const row =
-      existing ??
-      (
-        await this.db
-          .insert(payments)
-          .values({ invoiceId: inv.id, provider: 'click', providerTxnId: p.click_trans_id, amountTiyin: Math.round(Number(p.amount) * 100), state: 1, providerTime: Date.now() })
-          .returning()
-      )[0];
-    return this.reply(p, ClickErr.ok, 'Success', { merchant_prepare_id: row.id });
+    return this.db.transaction(async (tx) => {
+      const inv = (await this.billing.lockInvoice(tx, inv0.id))!;
+      if (inv.status === 'paid') return this.reply(p, ClickErr.alreadyPaid, 'Already paid');
+      if (inv.status === 'cancelled') return this.reply(p, ClickErr.cancelled, 'Transaction cancelled');
+      const [existing] = await tx
+        .select()
+        .from(payments)
+        .where(and(eq(payments.provider, 'click'), eq(payments.providerTxnId, p.click_trans_id)));
+      if (existing) return this.reply(p, ClickErr.ok, 'Success', { merchant_prepare_id: existing.id });
+      // Пока по счёту идёт оплата в Payme (или другая в Click), вторую не начинаем.
+      if (await this.billing.paymentInFlight(tx, inv.id, { provider: 'click', txnId: p.click_trans_id })) {
+        return this.reply(p, ClickErr.alreadyPaid, 'Invoice is being paid');
+      }
+      const [row] = await tx
+        .insert(payments)
+        .values({ invoiceId: inv.id, provider: 'click', providerTxnId: p.click_trans_id, amountTiyin: Math.round(Number(p.amount) * 100), state: 1, providerTime: Date.now() })
+        .returning();
+      return this.reply(p, ClickErr.ok, 'Success', { merchant_prepare_id: row.id });
+    });
   }
 
   async complete(p: ClickParams) {
     if (p.action !== '1') return this.reply(p, ClickErr.action, 'Action not found');
-    if (!this.cfg.CLICK_SECRET_KEY || clickSign(p, this.cfg.CLICK_SECRET_KEY) !== p.sign_string) return this.reply(p, ClickErr.sign, 'SIGN CHECK FAILED');
+    if (!this.signOk(p)) return this.reply(p, ClickErr.sign, 'SIGN CHECK FAILED');
     const [row] = await this.db
       .select()
       .from(payments)
@@ -103,10 +115,18 @@ export class ClickService {
       await this.db.update(payments).set({ state: -1, cancelTime: Date.now() }).where(eq(payments.id, row.id));
       return this.reply(p, ClickErr.cancelled, 'Transaction cancelled');
     }
-    if (inv.status === 'paid') return this.reply(p, ClickErr.alreadyPaid, 'Already paid');
-
-    await this.db.update(payments).set({ state: 2, performTime: Date.now() }).where(eq(payments.id, row.id));
-    await this.billing.markPaid(inv.id, 'click');
+    const paid = await this.db.transaction(async (tx) => {
+      const locked = await this.billing.lockInvoice(tx, inv.id);
+      // Счёт уже оплачен через Payme или отменён: Click по коду ошибки вернёт деньги покупателю.
+      if (!locked || locked.status !== 'issued' || (await this.billing.paidElsewhere(tx, inv.id, row.id))) {
+        await tx.update(payments).set({ state: -1, cancelTime: Date.now() }).where(eq(payments.id, row.id));
+        return null;
+      }
+      await tx.update(payments).set({ state: 2, performTime: Date.now() }).where(eq(payments.id, row.id));
+      return this.billing.applyPaid(tx, inv.id, 'click');
+    });
+    if (!paid) return this.reply(p, ClickErr.alreadyPaid, 'Already paid');
+    await this.billing.afterPaid(paid);
     return this.reply(p, ClickErr.ok, 'Success', { merchant_confirm_id: row.id });
   }
 }

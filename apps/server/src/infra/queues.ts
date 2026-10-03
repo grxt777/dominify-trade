@@ -47,8 +47,9 @@ export class QueueService implements OnModuleDestroy {
     };
   }
 
-  parse(job: ParseJob) {
-    return this.queues.parse.add('parse', job, { priority: 1, jobId: `parse-${job.requestId}-${Date.now()}` });
+  /** delayMs > 0 — для альбомов в боте: ждём остальные фото, прежде чем разбирать заявку. */
+  parse(job: ParseJob, delayMs = 0) {
+    return this.queues.parse.add('parse', job, { priority: 1, jobId: `parse-${job.requestId}-${Date.now()}`, delay: delayMs });
   }
 
   dispatch(job: DispatchJob, delayMs = 0) {

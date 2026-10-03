@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { API_URL, auth, BOT_USERNAME, get } from './api';
-import { Companies, CompanyPage, Dashboard, Invoices, Moderation, RequestAdmin, Requests, StaffPage } from './pages';
+import { Companies, CompanyPage, Dashboard, Disputes, Escrow, Invoices, Moderation, RequestAdmin, Requests, Reviews, StaffPage } from './pages';
 import './styles.css';
 
 const qc = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000, retry: 1 } } });
@@ -81,6 +81,9 @@ function Shell() {
         {link('/', 'Метрики')}
         {link('/moderation', 'Модерация', open)}
         {link('/requests', 'Заявки')}
+        {link('/disputes', 'Сделки и споры')}
+        {link('/escrow', 'Безопасные платежи')}
+        {link('/reviews', 'Отзывы')}
         {link('/companies', 'Компании')}
         {link('/invoices', 'Счета')}
         {link('/staff', 'Команда')}
@@ -102,6 +105,9 @@ function Shell() {
           <Route path="/moderation" element={<Moderation />} />
           <Route path="/requests" element={<Requests />} />
           <Route path="/requests/:id" element={<RequestAdmin />} />
+          <Route path="/disputes" element={<Disputes />} />
+          <Route path="/escrow" element={<Escrow />} />
+          <Route path="/reviews" element={<Reviews />} />
           <Route path="/companies" element={<Companies />} />
           <Route path="/companies/:id" element={<CompanyPage />} />
           <Route path="/invoices" element={<Invoices />} />

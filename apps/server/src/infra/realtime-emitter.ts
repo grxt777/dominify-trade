@@ -34,6 +34,20 @@ export class RealtimeEmitter implements OnModuleDestroy {
     this.emitter.to(`company:${companyId}`).emit(event, data);
   }
 
+  /** Сокеты пользователя подписываются на события компании сразу, без переподключения. */
+  joinCompany(userId: number, companyId: number) {
+    this.emitter.in(`user:${userId}`).socketsJoin(`company:${companyId}`);
+  }
+
+  /** Убранный из команды сотрудник перестаёт получать события компании сразу, а не после переподключения. */
+  leaveCompany(userId: number, companyId: number) {
+    this.emitter.in(`user:${userId}`).socketsLeave(`company:${companyId}`);
+  }
+
+  disconnectUser(userId: number) {
+    this.emitter.in(`user:${userId}`).disconnectSockets(true);
+  }
+
   async onModuleDestroy() {
     await this.redis.quit().catch(() => undefined);
   }

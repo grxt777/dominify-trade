@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b2f3a"/><stop offset="1" stop-color="#454b59"/></linearGradient>
+    <linearGradient id="wrap" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#00a6d6"/><stop offset="1" stop-color="#6a3df0"/></linearGradient>
+  </defs>
+  <rect width="640" height="400" fill="url(#bg)"/>
+  <rect y="318" width="640" height="82" fill="#22252d"/>
+  <g stroke="#fff" stroke-opacity=".25" stroke-width="4" stroke-dasharray="40 30"><line x1="0" y1="370" x2="640" y2="370"/></g>
+  <path d="M70 300V130q0-22 22-22h330l70 0q18 0 30 14l64 76q14 16 14 38v64z" fill="#fff"/>
+  <path d="M70 300V200h516q14 16 14 36v64z" fill="url(#wrap)"/>
+  <path d="M492 122l60 72h-86v-72z" fill="#9fd8ee"/>
+  <rect x="88" y="128" width="360" height="40" rx="6" fill="#fff"/>
+  <text x="100" y="157" fill="#1a1d24" font-size="26" font-weight="900">TEZKOR <tspan fill="#00a6d6">YETKAZISH</tspan></text>
+  <text x="96" y="232" fill="#fff" font-size="34" font-weight="900">24/7 &#183; butun Toshkent</text>
+  <text x="96" y="272" fill="#fff" fill-opacity=".9" font-size="24" font-weight="700">+998 71 200 00 00</text>
+  <circle cx="160" cy="306" r="40" fill="#14161b"/><circle cx="160" cy="306" r="16" fill="#9aa1ad"/>
+  <circle cx="500" cy="306" r="40" fill="#14161b"/><circle cx="500" cy="306" r="16" fill="#9aa1ad"/>
+  <rect x="582" y="252" width="16" height="16" rx="3" fill="#ffd34d"/>
+  <rect x="452" y="22" width="164" height="36" rx="18" fill="#fff" opacity=".9"/>
+  <text x="534" y="46" text-anchor="middle" fill="#1a1d24" font-size="16" font-weight="700">Plyonka &#183; 1 kun</text>
+</svg>

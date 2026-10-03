@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ZodError, type ZodTypeAny, type z } from 'zod';
+import { captureException } from '../infra/monitoring';
 
 /** Валидация тела запроса общей zod-схемой из @dominify/shared. */
 export class ZodPipe<S extends ZodTypeAny> implements PipeTransform<unknown, z.infer<S>> {
@@ -28,7 +29,11 @@ export class ZodPipe<S extends ZodTypeAny> implements PipeTransform<unknown, z.i
 }
 
 export class AppError extends HttpException {
-  constructor(code: string, message: string, status: HttpStatus = HttpStatus.BAD_REQUEST) {
+  constructor(
+    readonly code: string,
+    message: string,
+    status: HttpStatus = HttpStatus.BAD_REQUEST,
+  ) {
     super({ code, message }, status);
   }
 }
@@ -62,6 +67,8 @@ export class ErrorFilter implements ExceptionFilter {
       return;
     }
     this.log.error(exception instanceof Error ? exception.stack : String(exception));
+    const req = host.switchToHttp().getRequest<{ method?: string; route?: { path?: string } }>();
+    captureException(exception, { method: req?.method, route: req?.route?.path });
     res.status(500).json({ error: { code: 'internal', message: 'Внутренняя ошибка, мы уже разбираемся' } });
   }
 }

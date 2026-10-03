@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="Arial, Helvetica, sans-serif">
+  <rect width="640" height="400" fill="#f6f3ee"/>
+  <g stroke="#e4ded4" stroke-width="1">
+    <path d="M0 50h640M0 100h640M0 150h640M0 200h640M0 250h640M0 300h640M0 350h640"/>
+    <path d="M80 0v400M160 0v400M240 0v400M320 0v400M400 0v400M480 0v400M560 0v400"/>
+  </g>
+  <rect x="40" y="40" width="250" height="250" rx="24" fill="#1d2b53"/>
+  <circle cx="165" cy="150" r="72" fill="none" stroke="#ffcf3f" stroke-width="10"/>
+  <path d="M130 190V112l70 78V112" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="165" y="262" text-anchor="middle" fill="#fff" font-size="26" font-weight="700" letter-spacing="6">NAVRO'Z</text>
+  <rect x="320" y="40" width="280" height="118" rx="20" fill="#fff"/>
+  <circle cx="370" cy="99" r="28" fill="#ff5a5f"/>
+  <path d="M358 99l9 9 17-19" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="412" y="94" fill="#1d2b53" font-size="28" font-weight="800">tezkor</text>
+  <text x="413" y="120" fill="#8a8f9c" font-size="15" letter-spacing="3">YETKAZISH</text>
+  <rect x="320" y="172" width="135" height="118" rx="20" fill="#0fa37f"/>
+  <path d="M352 260c0-50 40-80 72-86-10 30-26 60-72 86z" fill="#fff"/>
+  <rect x="465" y="172" width="135" height="118" rx="20" fill="#fff"/>
+  <text x="532" y="246" text-anchor="middle" fill="#ff8a00" font-size="56" font-weight="900">S</text>
+  <g>
+    <circle cx="70" cy="340" r="18" fill="#1d2b53"/><circle cx="114" cy="340" r="18" fill="#ffcf3f"/><circle cx="158" cy="340" r="18" fill="#ff5a5f"/><circle cx="202" cy="340" r="18" fill="#0fa37f"/>
+  </g>
+  <text x="600" y="348" text-anchor="end" fill="#1d2b53" font-size="20" font-weight="700">3 ta konsepsiya &#183; brendbuk</text>
+</svg>

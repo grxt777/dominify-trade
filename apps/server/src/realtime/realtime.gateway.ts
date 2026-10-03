@@ -7,7 +7,7 @@ import {
   SubscribeMessage,
   WebSocketGateway,
 } from '@nestjs/websockets';
-import { memberships, type Db } from '@dominify/db';
+import { memberships, users, type Db } from '@dominify/db';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { eq } from 'drizzle-orm';
 import IORedis from 'ioredis';
@@ -18,13 +18,14 @@ import { CONFIG, DB } from '../infra/tokens';
 import { ChatService } from '../chat/chat';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RequestAccess } from '../requests/access';
+import { UsersService } from '../users/users.service';
 
 /**
  * WebSocket для Mini App. Авторизация тем же JWT. Комнаты user:<id> и company:<id> подключаются автоматически,
  * request:<id> и chat:<id> — по запросу клиента после проверки прав.
  * Redis-адаптер нужен, чтобы события из воркера и других реплик api доходили до сокета.
  */
-@WebSocketGateway({ path: '/ws', cors: { origin: true, credentials: true } })
+@WebSocketGateway({ path: '/ws' })
 export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnModuleDestroy {
   private readonly log = new Logger('Realtime');
   private pub?: IORedis;
@@ -36,6 +37,7 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnMo
     private readonly access: RequestAccess,
     private readonly chat: ChatService,
     private readonly notifications: NotificationsService,
+    private readonly users: UsersService,
   ) {}
 
   afterInit(server: Server) {
@@ -45,14 +47,30 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnMo
     server.use((socket, next) => {
       const token = (socket.handshake.auth?.token as string | undefined) ?? '';
       const claims = verifyJwt(token, this.cfg.JWT_SECRET);
-      if (!claims) return next(new Error('unauthorized'));
+      if (!claims || claims.scope !== 'user') return next(new Error('unauthorized'));
       socket.data.userId = claims.sub;
+      socket.data.exp = claims.exp;
       next();
     });
   }
 
   async handleConnection(socket: Socket) {
     const userId = socket.data.userId as number;
+    const [u] = await this.db
+      .select({ telegramId: users.telegramId, phoneHash: users.phoneHash, deletedAt: users.deletedAt })
+      .from(users)
+      .where(eq(users.id, userId));
+    if (!u || u.deletedAt || (await this.users.isUserBlocked(u))) {
+      socket.disconnect(true);
+      return;
+    }
+    // Сокет живёт не дольше токена: клиент получает 'unauthorized', обновляет токен и переподключается.
+    const ttlMs = (socket.data.exp as number) * 1000 - Date.now();
+    const timer = setTimeout(() => {
+      socket.emit('unauthorized');
+      socket.disconnect(true);
+    }, Math.max(0, Math.min(ttlMs, 2_147_000_000)));
+    socket.once('disconnect', () => clearTimeout(timer));
     await socket.join(`user:${userId}`);
     const comps = await this.db.select({ id: memberships.companyId }).from(memberships).where(eq(memberships.userId, userId));
     for (const c of comps) await socket.join(`company:${c.id}`);

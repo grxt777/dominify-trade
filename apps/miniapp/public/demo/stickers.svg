@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="Arial, Helvetica, sans-serif">
+  <rect width="640" height="400" fill="#ffe9d6"/>
+  <rect x="60" y="40" width="520" height="320" rx="18" fill="#fff" transform="rotate(-3 320 200)"/>
+  <g transform="rotate(-3 320 200)">
+    <circle cx="160" cy="130" r="62" fill="#ff5a5f"/>
+    <circle cx="160" cy="130" r="50" fill="none" stroke="#fff" stroke-width="3" stroke-dasharray="6 6"/>
+    <text x="160" y="124" text-anchor="middle" fill="#fff" font-size="22" font-weight="900">FRESH</text>
+    <text x="160" y="150" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">BAKERY</text>
+    <rect x="250" y="76" width="150" height="104" rx="16" fill="#1d2b53"/>
+    <text x="325" y="122" text-anchor="middle" fill="#ffcf3f" font-size="26" font-weight="900">100%</text>
+    <text x="325" y="152" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">HALOL</text>
+    <path d="M490 72l18 36 40 6-29 28 7 40-36-19-36 19 7-40-29-28 40-6z" fill="#ffcf3f"/>
+    <text x="490" y="138" text-anchor="middle" fill="#7a4b00" font-size="16" font-weight="900">NEW</text>
+    <rect x="110" y="222" width="190" height="88" rx="44" fill="#0fa37f"/>
+    <text x="205" y="274" text-anchor="middle" fill="#fff" font-size="24" font-weight="900">eco pack</text>
+    <ellipse cx="410" cy="266" rx="80" ry="50" fill="#6a3df0"/>
+    <text x="410" y="274" text-anchor="middle" fill="#fff" font-size="22" font-weight="800">-20% SALE</text>
+    <rect x="510" y="226" width="60" height="80" rx="10" fill="#00a6d6"/>
+    <text x="540" y="274" text-anchor="middle" fill="#fff" font-size="26" font-weight="900">QR</text>
+  </g>
+  <rect x="452" y="346" width="164" height="36" rx="18" fill="#111" opacity=".78"/>
+  <text x="534" y="370" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">Kesib beriladi</text>
+</svg>

@@ -1,8 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createHmac } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '../config';
 import { CONFIG } from './tokens';
@@ -14,8 +14,11 @@ import { CONFIG } from './tokens';
 @Injectable()
 export class StorageService {
   private readonly s3: S3Client | null;
+  /** Отдельный ключ для подписи ссылок на файлы, производный от JWT_SECRET: токен входа и ссылка не взаимозаменяемы. */
+  private readonly linkKey: Buffer;
 
   constructor(@Inject(CONFIG) private readonly cfg: Config) {
+    this.linkKey = createHmac('sha256', cfg.JWT_SECRET).update('dominify:file-links').digest();
     this.s3 =
       cfg.STORAGE_DRIVER === 's3'
         ? new S3Client({
@@ -63,6 +66,19 @@ export class StorageService {
     return readFile(this.localPath(key));
   }
 
+  async exists(key: string): Promise<boolean> {
+    try {
+      if (this.s3) {
+        await this.s3.send(new HeadObjectCommand({ Bucket: this.cfg.S3_BUCKET, Key: key }));
+        return true;
+      }
+      await stat(this.localPath(key));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ── локальный режим ──
 
   localPath(key: string): string {
@@ -70,15 +86,19 @@ export class StorageService {
     return path.resolve(this.cfg.LOCAL_STORAGE_DIR, safe);
   }
 
+  private sign(op: string, key: string, exp: number): string {
+    return createHmac('sha256', this.linkKey).update(`${op}:${key}:${exp}`).digest('base64url');
+  }
+
   private localSig(key: string, op: 'get' | 'put', ttlSec: number): string {
     const exp = Math.floor(Date.now() / 1000) + ttlSec;
-    const sig = createHmac('sha256', this.cfg.JWT_SECRET).update(`${op}:${key}:${exp}`).digest('base64url');
-    return `op=${op}&exp=${exp}&sig=${sig}`;
+    return `op=${op}&exp=${exp}&sig=${this.sign(op, key, exp)}`;
   }
 
   verifyLocalSig(key: string, op: string, exp: number, sig: string): boolean {
     if (!exp || exp < Date.now() / 1000) return false;
-    const expected = createHmac('sha256', this.cfg.JWT_SECRET).update(`${op}:${key}:${exp}`).digest('base64url');
-    return expected === sig;
+    const expected = Buffer.from(this.sign(op, key, exp));
+    const got = Buffer.from(sig);
+    return expected.length === got.length && timingSafeEqual(expected, got);
   }
 }

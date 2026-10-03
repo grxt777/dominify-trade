@@ -3,6 +3,8 @@ import {
   companies,
   deals,
   files,
+  gigs,
+  memberships,
   moderationItems,
   offers,
   requestDeliveries,
@@ -24,6 +26,8 @@ import IORedis from 'ioredis';
 import type { Config } from '../config';
 import { AppError, forbidden, notFound } from '../common/http';
 import { CatalogService } from '../catalog/catalog';
+import { FilesService } from '../files/files';
+import { GigsService } from '../gigs/gigs';
 import { Analytics } from '../infra/infra.module';
 import { QueueService } from '../infra/queues';
 import { RealtimeEmitter } from '../infra/realtime-emitter';
@@ -34,6 +38,11 @@ import { RequestAccess } from './access';
 import { summarize } from './summary';
 
 type RequestRow = typeof requests.$inferSelect;
+
+/** После стольких ответов бот перестаёт спрашивать: остальное покупатель заполняет в форме. */
+const MAX_CLARIFICATIONS = 4;
+/** Столько же, сколько допускает схема заявки из Mini App. */
+const MAX_REQUEST_FILES = 10;
 
 @Injectable()
 export class RequestsService {
@@ -47,25 +56,26 @@ export class RequestsService {
     private readonly notifications: NotificationsService,
     private readonly access: RequestAccess,
     private readonly analytics: Analytics,
+    private readonly files: FilesService,
+    private readonly gigs: GigsService,
   ) {}
 
   /** Черновик из текста и вложений; разбор идёт в воркере, результат придёт по WebSocket или в чат бота. */
-  async createDraft(userId: number, dto: ParseRequestDto, source: 'miniapp' | 'bot' = 'miniapp') {
-    if (!dto.text && dto.fileIds.length === 0) throw new AppError('empty', 'Опишите, что нужно, или приложите фото');
-    const [today] = await this.db
-      .select({ c: sql<number>`count(*)::int` })
-      .from(requests)
-      .where(and(eq(requests.authorUserId, userId), sql`${requests.createdAt} > now() - interval '24 hours'`));
-    if ((today?.c ?? 0) >= this.cfg.AI_DAILY_PARSE_LIMIT_PER_USER) {
-      throw new AppError('daily_limit', 'На сегодня лимит заявок исчерпан. Если это ошибка, напишите в поддержку.', HttpStatus.TOO_MANY_REQUESTS);
+  async createDraft(userId: number, dto: ParseRequestDto, source: 'miniapp' | 'bot' = 'miniapp', parseDelayMs = 0) {
+    if (!dto.text && dto.fileIds.length === 0 && !dto.gigId) throw new AppError('empty', 'Опишите, что нужно, или приложите фото');
+    await this.files.assertOwnReady(userId, dto.fileIds);
+    let order: { gigId: number; gigPackage: string | null; preferredCompanyId: number; title: string } | null = null;
+    if (dto.gigId) {
+      const { gig, pkg } = await this.gigs.packageFor(dto.gigId, dto.packageCode);
+      const [own] = await this.db
+        .select({ id: memberships.companyId })
+        .from(memberships)
+        .where(and(eq(memberships.userId, userId), eq(memberships.companyId, gig.companyId)))
+        .limit(1);
+      if (own) throw new AppError('own_gig', 'Нельзя заказать собственную услугу');
+      order = { gigId: gig.id, gigPackage: pkg?.code ?? null, preferredCompanyId: gig.companyId, title: gig.title };
     }
-    if (dto.fileIds.length) {
-      const own = await this.db
-        .select({ id: files.id })
-        .from(files)
-        .where(and(inArray(files.id, dto.fileIds), eq(files.ownerUserId, userId)));
-      if (own.length !== dto.fileIds.length) throw forbidden('Файл не найден');
-    }
+    await this.chargeParse(userId);
     const [u] = await this.db.select().from(users).where(eq(users.id, userId));
     let regionCode = dto.regionCode ?? null;
     let buyerCompanyId: number | null = null;
@@ -81,29 +91,68 @@ export class RequestsService {
       .values({
         authorUserId: userId,
         buyerCompanyId,
-        rawText: dto.text,
+        rawText: dto.text || order?.title || '',
         source,
         regionCode,
         lang: u?.lang ?? 'ru',
         status: 'draft',
+        gigId: order?.gigId ?? null,
+        gigPackage: order?.gigPackage ?? null,
+        preferredCompanyId: order?.preferredCompanyId ?? null,
       })
       .returning();
     if (dto.fileIds.length) await this.db.insert(requestFiles).values(dto.fileIds.map((fileId) => ({ requestId: row.id, fileId })));
-    await this.queues.parse({ requestId: row.id });
-    this.analytics.track('request.created', userId, { requestId: row.id, source });
+    await this.queues.parse({ requestId: row.id }, parseDelayMs);
+    this.analytics.track('request.created', userId, { requestId: row.id, source, gigId: order?.gigId });
     return this.view(userId, row.id);
+  }
+
+  /**
+   * Следующее фото из того же альбома Telegram: прикрепляем к уже созданному черновику, а не создаём новую заявку.
+   * Подпись альбома может прийти с любым фото — дописываем её к тексту.
+   */
+  async attachToDraft(userId: number, requestId: number, fileIds: number[], caption?: string) {
+    const req = await this.own(userId, requestId);
+    await this.files.assertOwnReady(userId, fileIds);
+    const [{ c }] = await this.db.select({ c: sql<number>`count(*)::int` }).from(requestFiles).where(eq(requestFiles.requestId, requestId));
+    if (c + fileIds.length > MAX_REQUEST_FILES) return;
+    if (fileIds.length) await this.db.insert(requestFiles).values(fileIds.map((fileId) => ({ requestId, fileId }))).onConflictDoNothing();
+    if (caption && req.status === 'draft') {
+      await this.db
+        .update(requests)
+        .set({ rawText: req.rawText ? `${req.rawText}\n${caption}` : caption, updatedAt: new Date() })
+        .where(eq(requests.id, requestId));
+    }
   }
 
   /** Ответ на уточняющий вопрос: дописываем к заявке и разбираем заново. */
   async answer(userId: number, requestId: number, answer: string) {
     const req = await this.own(userId, requestId);
     if (!['draft', 'needs_info'].includes(req.status)) throw new AppError('bad_status', 'Заявка уже отправлена');
+    if (req.answers.length >= MAX_CLARIFICATIONS) {
+      throw new AppError('too_many_answers', 'Достаточно уточнений: заполните оставшиеся поля в приложении и отправьте заявку', HttpStatus.CONFLICT);
+    }
+    await this.chargeParse(userId);
     await this.db
       .update(requests)
       .set({ answers: [...req.answers, { q: req.question ?? '', a: answer }], status: 'draft', updatedAt: new Date() })
       .where(eq(requests.id, requestId));
     await this.queues.parse({ requestId });
     return this.view(userId, requestId);
+  }
+
+  /**
+   * Каждый разбор — платный вызов LLM. Считаем вызовы (а не заявки) за сутки по Ташкенту:
+   * иначе лимит обходится бесконечными ответами на уточняющие вопросы.
+   */
+  private async chargeParse(userId: number) {
+    const day = new Date(Date.now() + 5 * 3600_000).toISOString().slice(0, 10);
+    const key = `parse:${userId}:${day}`;
+    const n = await this.redis.incr(key);
+    if (n === 1) await this.redis.expire(key, 2 * 86_400);
+    if (n > this.cfg.AI_DAILY_PARSE_LIMIT_PER_USER) {
+      throw new AppError('daily_limit', 'На сегодня лимит заявок исчерпан. Если это ошибка, напишите в поддержку.', HttpStatus.TOO_MANY_REQUESTS);
+    }
   }
 
   /** Вызывается воркером после разбора: сообщить автору в Mini App и, если заявка из бота, в чат. */
@@ -274,6 +323,7 @@ export class RequestsService {
       .from(requestFiles)
       .innerJoin(files, eq(files.id, requestFiles.fileId))
       .where(eq(requestFiles.requestId, requestId));
+    const order = req.gigId ? await this.orderOf(req.gigId, req.gigPackage) : null;
 
     const base = {
       id: req.id,
@@ -295,6 +345,7 @@ export class RequestsService {
       submittedAt: req.submittedAt,
       expiresAt: req.expiresAt,
       wave: req.wave,
+      order,
     };
 
     if (role.kind === 'supplier') {
@@ -310,7 +361,12 @@ export class RequestsService {
         ? await this.db.select({ name: companies.name, trustLevel: companies.trustLevel }).from(companies).where(eq(companies.id, req.buyerCompanyId))
         : [];
       const [author] = await this.db.select({ firstName: users.firstName }).from(users).where(eq(users.id, req.authorUserId));
-      const [deal] = await this.db.select({ id: deals.id }).from(deals).where(and(eq(deals.requestId, requestId), eq(deals.supplierCompanyId, role.companyId)));
+      const [deal] = await this.db
+        .select({ id: deals.id })
+        .from(deals)
+        .where(and(eq(deals.requestId, requestId), eq(deals.supplierCompanyId, role.companyId)))
+        .orderBy(desc(deals.createdAt))
+        .limit(1);
       return {
         ...base,
         rawText: undefined,
@@ -324,7 +380,11 @@ export class RequestsService {
     }
 
     const offerRows = await this.offersFor(requestId);
-    const [deal] = await this.db.select({ id: deals.id }).from(deals).where(eq(deals.requestId, requestId));
+    const [deal] = await this.db
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.requestId, requestId), sql`${deals.status} <> 'cancelled'`))
+      .limit(1);
     return {
       ...base,
       role: role.kind,
@@ -334,6 +394,25 @@ export class RequestsService {
       answers: req.answers,
       offers: offerRows,
       dealId: deal?.id ?? null,
+    };
+  }
+
+  /** Заказ с витрины: что именно выбрал покупатель. Услугу могли снять — тогда блока нет. */
+  private async orderOf(gigId: number, packageCode: string | null) {
+    const [g] = await this.db
+      .select({ id: gigs.id, title: gigs.title, cover: gigs.cover, packages: gigs.packages, companyId: companies.id, companyName: companies.name })
+      .from(gigs)
+      .innerJoin(companies, eq(companies.id, gigs.companyId))
+      .where(eq(gigs.id, gigId));
+    if (!g) return null;
+    const pkg = g.packages.find((p) => p.code === packageCode) ?? null;
+    return {
+      gigId: g.id,
+      title: g.title,
+      cover: g.cover,
+      companyId: g.companyId,
+      companyName: g.companyName,
+      package: pkg ? { code: pkg.code, name: pkg.name, priceUzs: pkg.priceUzs, days: pkg.days, revisions: pkg.revisions, features: pkg.features } : null,
     };
   }
 

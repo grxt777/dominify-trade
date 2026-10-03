@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Inject, Injectable, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Injectable, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import {
   companies,
+  companyInvites,
   memberships,
   reviews,
   serviceAreas,
@@ -17,14 +18,17 @@ import {
   type PlanCode,
   type UpdateCompanyDto,
 } from '@dominify/shared';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import type { Config } from '../config';
-import { encrypt, lookupHash } from '../common/crypto';
+import { encrypt, lookupHash, randomToken } from '../common/crypto';
 import { AppError, conflict, notFound, ZodPipe } from '../common/http';
-import { CurrentUser, type AuthUser } from '../auth/guards';
+import { CurrentUser, RateLimit, type AuthUser } from '../auth/guards';
 import { CatalogService } from '../catalog/catalog';
 import { Analytics } from '../infra/infra.module';
+import { RealtimeEmitter } from '../infra/realtime-emitter';
 import { CONFIG, DB } from '../infra/tokens';
+import { NotificationsService } from '../notifications/notifications.service';
 import { UsersService } from '../users/users.service';
 
 @Injectable()
@@ -35,9 +39,18 @@ export class CompaniesService {
     private readonly users: UsersService,
     private readonly catalog: CatalogService,
     private readonly analytics: Analytics,
+    private readonly realtime: RealtimeEmitter,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(userId: number, dto: CreateCompanyDto) {
+    const [owned] = await this.db
+      .select({ c: sql<number>`count(*)::int` })
+      .from(memberships)
+      .where(and(eq(memberships.userId, userId), eq(memberships.role, 'owner')));
+    if ((owned?.c ?? 0) >= this.cfg.MAX_COMPANIES_PER_USER) {
+      throw new AppError('company_limit', `Можно владеть не более чем ${this.cfg.MAX_COMPANIES_PER_USER} компаниями. Если нужно больше, напишите в поддержку.`, HttpStatus.CONFLICT);
+    }
     let innEnc: string | null = null;
     let innHash: string | null = null;
     if (dto.inn) {
@@ -82,7 +95,9 @@ export class CompaniesService {
   }
 
   async update(userId: number, companyId: number, dto: UpdateCompanyDto) {
-    await this.users.assertMember(userId, companyId);
+    // Реквизиты меняет только владелец; сотрудник может настраивать категории, районы и описание.
+    if (dto.inn !== undefined || dto.name !== undefined || dto.type !== undefined) await this.users.assertOwner(userId, companyId);
+    else await this.users.assertMember(userId, companyId);
     const plan = await this.planOf(companyId);
     if (dto.categoryIds) await this.assertCategoryLimit(dto.categoryIds, plan);
     await this.db.transaction(async (tx) => {
@@ -98,9 +113,14 @@ export class CompaniesService {
         const innHash = lookupHash(dto.inn, this.cfg.HASH_KEY);
         const [dup] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.innHash, innHash));
         if (dup && dup.id !== companyId) throw conflict('inn_taken', 'Компания с таким ИНН уже есть');
-        patch.innHash = innHash;
-        patch.innEnc = encrypt(dto.inn, this.cfg.ENCRYPTION_KEY);
-        patch.innVerifiedAt = null;
+        if (!dup) {
+          if (await this.users.isBlacklisted('inn_hash', innHash)) throw new AppError('blocked', 'ИНН заблокирован');
+          patch.innHash = innHash;
+          patch.innEnc = encrypt(dto.inn, this.cfg.ENCRYPTION_KEY);
+          patch.innVerifiedAt = null;
+          // Смена ИНН снимает проверку: значок доверия L1/L2 не должен переезжать на непроверенный ИНН.
+          patch.trustLevel = sql`case when ${companies.trustLevel} >= 3 then ${companies.trustLevel} else 0 end` as unknown as number;
+        }
       }
       if (Object.keys(patch).length) await tx.update(companies).set(patch).where(eq(companies.id, companyId));
       if (dto.categoryIds) {
@@ -114,6 +134,90 @@ export class CompaniesService {
       }
     });
     return this.profile(companyId, true);
+  }
+
+  // ── Команда ──
+
+  async members(userId: number, companyId: number) {
+    await this.users.assertMember(userId, companyId);
+    const rows = await this.db
+      .select({ userId: users.id, firstName: users.firstName, username: users.username, role: memberships.role, joinedAt: memberships.createdAt })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .where(eq(memberships.companyId, companyId))
+      .orderBy(memberships.createdAt);
+    const plan = await this.planOf(companyId);
+    return { seats: PLANS[plan].seats, members: rows };
+  }
+
+  /** Ссылка-приглашение: открывает Mini App с параметром join_<token>. Свободное место проверяется сразу и при входе. */
+  async createInvite(userId: number, companyId: number) {
+    await this.users.assertOwner(userId, companyId);
+    await this.assertFreeSeat(companyId);
+    const token = randomToken(18);
+    const expiresAt = new Date(Date.now() + this.cfg.INVITE_TTL_HOURS * 3600_000);
+    await this.db.insert(companyInvites).values({ companyId, token, createdByUserId: userId, expiresAt });
+    return { token, expiresAt, url: `https://t.me/${this.cfg.BOT_USERNAME}/${this.cfg.MINIAPP_SHORT_NAME}?startapp=join_${token}` };
+  }
+
+  async joinByInvite(userId: number, token: string) {
+    const companyId = await this.db.transaction(async (tx) => {
+      const [inv] = await tx.select().from(companyInvites).where(eq(companyInvites.token, token)).for('update');
+      if (!inv || inv.usedAt || inv.expiresAt.getTime() < Date.now()) {
+        throw new AppError('invite_invalid', 'Приглашение недействительно или уже использовано', HttpStatus.GONE);
+      }
+      const [already] = await tx.select().from(memberships).where(and(eq(memberships.userId, userId), eq(memberships.companyId, inv.companyId)));
+      if (already) return inv.companyId;
+      // Блокировка строки компании: два одновременных входа не займут одно последнее место.
+      await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, inv.companyId)).for('update');
+      await this.assertFreeSeat(inv.companyId, tx);
+      await tx.insert(memberships).values({ userId, companyId: inv.companyId, role: inv.role });
+      await tx.update(companyInvites).set({ usedAt: new Date(), usedByUserId: userId }).where(eq(companyInvites.id, inv.id));
+      await tx.update(users).set({ activeCompanyId: inv.companyId, activeRole: 'supplier' }).where(eq(users.id, userId));
+      return inv.companyId;
+    });
+    this.realtime.joinCompany(userId, companyId);
+    const [joined] = await this.db.select({ firstName: users.firstName }).from(users).where(eq(users.id, userId));
+    const owners = await this.db
+      .select({ userId: memberships.userId })
+      .from(memberships)
+      .where(and(eq(memberships.companyId, companyId), eq(memberships.role, 'owner')));
+    for (const o of owners) await this.notifications.notify(o.userId, 'team_joined', { name: joined?.firstName ?? '' });
+    this.analytics.track('company.member_joined', userId, { companyId });
+    return this.profile(companyId, true);
+  }
+
+  /** Владелец убирает сотрудника; сотрудник может уйти сам. Последнего владельца убрать нельзя. */
+  async removeMember(userId: number, companyId: number, targetUserId: number) {
+    const me = await this.users.assertMember(userId, companyId);
+    if (targetUserId !== userId && me.role !== 'owner') throw new AppError('forbidden', 'Это может сделать только владелец компании', HttpStatus.FORBIDDEN);
+    const [target] = await this.db.select().from(memberships).where(and(eq(memberships.userId, targetUserId), eq(memberships.companyId, companyId)));
+    if (!target) throw notFound('Сотрудник');
+    if (target.role === 'owner') {
+      const [owners] = await this.db
+        .select({ c: sql<number>`count(*)::int` })
+        .from(memberships)
+        .where(and(eq(memberships.companyId, companyId), eq(memberships.role, 'owner')));
+      if ((owners?.c ?? 0) <= 1) throw new AppError('last_owner', 'Нельзя убрать единственного владельца компании');
+    }
+    await this.db.transaction(async (tx) => {
+      await tx.delete(memberships).where(and(eq(memberships.userId, targetUserId), eq(memberships.companyId, companyId)));
+      await tx.update(users).set({ activeCompanyId: null, activeRole: 'buyer' }).where(and(eq(users.id, targetUserId), eq(users.activeCompanyId, companyId)));
+    });
+    this.realtime.leaveCompany(targetUserId, companyId);
+    return { ok: true };
+  }
+
+  private async assertFreeSeat(companyId: number, tx: Pick<Db, 'select'> = this.db) {
+    const plan = await this.planOf(companyId);
+    const [m] = await tx.select({ c: sql<number>`count(*)::int` }).from(memberships).where(eq(memberships.companyId, companyId));
+    if ((m?.c ?? 0) >= PLANS[plan].seats) {
+      throw new AppError(
+        'seat_limit',
+        `На тарифе «${PLANS[plan].name.ru}» мест в команде: ${PLANS[plan].seats}. Чтобы добавить сотрудника, смените тариф.`,
+        HttpStatus.PAYMENT_REQUIRED,
+      );
+    }
   }
 
   async planOf(companyId: number): Promise<PlanCode> {
@@ -182,9 +286,34 @@ export class CompaniesController {
     return this.companies.update(u.id, id, dto);
   }
 
+  /** Вход в команду по ссылке-приглашению. Объявлен до ':id', чтобы 'join' не разбирался как ID. */
+  @Post('join')
+  @HttpCode(HttpStatus.OK)
+  @RateLimit('join', 10, 3600)
+  join(@CurrentUser() u: AuthUser, @Body(new ZodPipe(z.object({ token: z.string().min(10).max(64) }))) b: { token: string }) {
+    return this.companies.joinByInvite(u.id, b.token);
+  }
+
   @Get(':id')
   async get(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number) {
     const own = await this.users.assertMember(u.id, id).then(() => true).catch(() => false);
     return this.companies.profile(id, own);
+  }
+
+  @Get(':id/members')
+  members(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.companies.members(u.id, id);
+  }
+
+  @Post(':id/invites')
+  @RateLimit('invite', 20, 3600)
+  invite(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.companies.createInvite(u.id, id);
+  }
+
+  @Delete(':id/members/:userId')
+  @HttpCode(HttpStatus.OK)
+  removeMember(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Param('userId', ParseIntPipe) userId: number) {
+    return this.companies.removeMember(u.id, id, userId);
   }
 }

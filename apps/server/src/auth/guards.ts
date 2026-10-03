@@ -8,8 +8,8 @@ import {
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { staff, users, type Db } from '@dominify/db';
-import { eq } from 'drizzle-orm';
+import { blacklist, staff, users, type Db } from '@dominify/db';
+import { eq, sql } from 'drizzle-orm';
 import type { Request } from 'express';
 import IORedis from 'ioredis';
 import type { Config } from '../config';
@@ -66,11 +66,18 @@ export class AuthGuard implements CanActivate {
         activeRole: users.activeRole,
         activeCompanyId: users.activeCompanyId,
         staffRole: staff.role,
+        deletedAt: users.deletedAt,
+        blocked: sql<boolean>`exists (
+          select 1 from ${blacklist} b
+          where (b.kind = 'telegram_id' and b.value = ${users.telegramId}::text)
+             or (b.kind = 'phone_hash' and b.value = ${users.phoneHash})
+        )`,
       })
       .from(users)
       .leftJoin(staff, eq(staff.userId, users.id))
       .where(eq(users.id, claims.sub));
-    if (!row) throw new AppError('unauthorized', 'Пользователь не найден', HttpStatus.UNAUTHORIZED);
+    if (!row || row.deletedAt) throw new AppError('unauthorized', 'Пользователь не найден', HttpStatus.UNAUTHORIZED);
+    if (row.blocked) throw new AppError('blocked', 'Доступ ограничен', HttpStatus.FORBIDDEN);
 
     const roles = this.reflector.getAllAndOverride<string[] | undefined>(STAFF_ROLES_KEY, [ctx.getHandler(), ctx.getClass()]);
     if (roles) {
@@ -78,7 +85,14 @@ export class AuthGuard implements CanActivate {
         throw new AppError('forbidden', 'Только для команды платформы', HttpStatus.FORBIDDEN);
       }
     }
-    req.user = { ...row, staffRole: row.staffRole ?? null };
+    req.user = {
+      id: row.id,
+      telegramId: row.telegramId,
+      lang: row.lang,
+      activeRole: row.activeRole,
+      activeCompanyId: row.activeCompanyId,
+      staffRole: row.staffRole ?? null,
+    };
     return true;
   }
 }

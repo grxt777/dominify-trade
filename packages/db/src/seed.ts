@@ -3,16 +3,28 @@ import { CATALOG, type SeedCategory } from './catalog';
 import { createDb, type Db } from './client';
 import { categories } from './schema';
 
-/** Идемпотентно залить каталог: существующие slug обновляются, новые добавляются. */
+/**
+ * Идемпотентно залить каталог: новые slug добавляются, у существующих обновляются название и место в дереве.
+ * Поля, ключевые слова и активность, которые команда правила в админке (edited_at), сид не трогает.
+ */
 export async function seedCatalog(db: Db): Promise<number> {
   let count = 0;
+  const keepIfEdited = (column: string) =>
+    sql.raw(`case when "categories"."edited_at" is null then excluded."${column}" else "categories"."${column}" end`);
   const upsert = async (c: SeedCategory, parentId: number | null, sort: number) => {
     const [row] = await db
       .insert(categories)
       .values({ slug: c.slug, name: c.name, fields: c.fields, keywords: c.keywords, parentId, sort })
       .onConflictDoUpdate({
         target: categories.slug,
-        set: { name: c.name, fields: c.fields, keywords: c.keywords, parentId, sort, active: true },
+        set: {
+          name: c.name,
+          parentId,
+          sort,
+          fields: keepIfEdited('fields'),
+          keywords: keepIfEdited('keywords'),
+          active: sql.raw(`case when "categories"."edited_at" is null then true else "categories"."active" end`),
+        },
       })
       .returning({ id: categories.id });
     count += 1;

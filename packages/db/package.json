@@ -9,10 +9,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "drizzle-kit generate",
     "migrate": "node --env-file-if-exists=../../.env dist/migrate.js",
-    "seed": "node --env-file-if-exists=../../.env dist/seed.js"
+    "seed": "node --env-file-if-exists=../../.env dist/seed.js",
+    "seed:demo": "node --env-file-if-exists=../../.env dist/demo.js"
   },
   "dependencies": {
     "@dominify/shared": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
     "drizzle-orm": "^0.44.7",
     "pg": "^8.23.0"
   },

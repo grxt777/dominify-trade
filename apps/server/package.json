@@ -24,6 +24,7 @@
     "@nestjs/platform-express": "^11.2.6",
     "@nestjs/platform-socket.io": "^11.2.6",
     "@nestjs/websockets": "^11.2.6",
+    "@sentry/node": "^9.47.2",
     "@socket.io/redis-adapter": "^8.3.0",
     "@socket.io/redis-emitter": "^5.1.0",
     "bullmq": "^5.81.5",

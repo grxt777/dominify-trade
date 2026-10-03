@@ -2,10 +2,12 @@ import type { FieldDef } from '@dominify/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { get, post, type Offer, type RequestView } from '../api';
+import { ApiError, get, imgSrc, post, type Offer, type RequestView } from '../api';
 import { useT } from '../i18n';
+import { useSession } from '../session';
 import { useSocketEvent } from '../socket';
-import { confirm, haptic, openLink } from '../tg';
+import { confetti } from '../motion';
+import { confirm, openLink } from '../tg';
 import { BackButton, Empty, fmtDate, MainButton, money, regionName, Section, Spinner, Stars, StatusPill, TrustBadge, useToast } from '../ui';
 import { CategorySelect, FieldInput, RegionSelect, useLeafCategories } from './fields';
 
@@ -49,6 +51,32 @@ function Files({ files }: { files: RequestView['files'] }) {
         </button>
       ))}
     </div>
+  );
+}
+
+/** Заказ с витрины: какую услугу и пакет выбрал покупатель. */
+function OrderCard({ r }: { r: RequestView }) {
+  const t = useT();
+  const nav = useNavigate();
+  const o = r.order;
+  if (!o) return null;
+  return (
+    <Section title={r.role === 'supplier' ? t('orderViaGig') : t('yourOrder')}>
+      <div className="order-card" onClick={() => r.role !== 'supplier' && nav(`/gigs/${o.gigId}`)}>
+        {o.cover && <img src={imgSrc(o.cover)} alt="" />}
+        <div className="cell-main">
+          <div className="small muted">{o.companyName}</div>
+          <div style={{ fontWeight: 600 }}>{o.title}</div>
+          {o.package && (
+            <div className="row small" style={{ marginTop: 4 }}>
+              <span className="pill cyan">{t('packageLabel')}: {o.package.name}</span>
+              <b>{money(o.package.priceUzs)} {t('sum')}</b>
+              <span className="muted">{t.f('daysTpl', o.package.days)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -147,7 +175,7 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
         deadline: deadline || null,
         budgetUzs: budget ? Number(budget) : null,
       });
-      haptic('success');
+      confetti({ count: 90 });
       onChange();
     } catch (e) {
       toast((e as Error).message, 'error');
@@ -159,8 +187,9 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
   if (parsing) {
     return (
       <>
-        <BackButton to="/" />
+        <BackButton to="/orders" />
         <h1>{t('parsing')}</h1>
+        <OrderCard r={r} />
         <Section>
           <div className="stack">
             <div className="skeleton" style={{ width: '70%' }} />
@@ -180,8 +209,9 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
 
   return (
     <>
-      <BackButton to="/" />
+      <BackButton to="/orders" />
       <h1>{t('checkAndSend')}</h1>
+      <OrderCard r={r} />
       {r.duplicateOf && (
         <Section>
           <div className="row between">
@@ -226,7 +256,7 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
           <div className="muted small" style={{ whiteSpace: 'pre-wrap' }}>{r.rawText}</div>
         </Section>
       )}
-      <MainButton text={t('sendToSuppliers')} onClick={submit} loading={busy} disabled={!categoryId || missing.length > 0} />
+      <MainButton text={r.order ? t('sendOrder') : t('sendToSuppliers')} onClick={submit} loading={busy} disabled={!categoryId || missing.length > 0} />
     </>
   );
 }
@@ -246,7 +276,7 @@ function AuthorView({ r, onChange }: { r: RequestView; onChange: () => void }) {
     setBusy(o.id);
     try {
       const deal = await post<{ id: number }>(`/v1/offers/${o.id}/choose`);
-      haptic('success');
+      confetti();
       nav(`/deals/${deal.id}`);
     } catch (e) {
       toast((e as Error).message, 'error');
@@ -269,8 +299,9 @@ function AuthorView({ r, onChange }: { r: RequestView; onChange: () => void }) {
 
   return (
     <>
-      <BackButton to="/" />
+      <BackButton to="/orders" />
       <h1>{r.title || `#${r.id}`}</h1>
+      <OrderCard r={r} />
       <Section>
         <div className="row between" style={{ marginBottom: 10 }}>
           <StatusPill status={r.status} />
@@ -296,6 +327,7 @@ function AuthorView({ r, onChange }: { r: RequestView; onChange: () => void }) {
         <Section title={`${t('offers')} · ${offers.length}`} body={false}>
           {offers.map((o, i) => (
             <div key={o.id} className={`offer ${i === 0 && offers.length > 1 ? 'best' : ''}`}>
+              {o.supplier.id === r.order?.companyId && <span className="pill magenta">{t('chosenSeller')}</span>}
               <div className="row between">
                 <div style={{ fontWeight: 600 }}>{o.supplier.name}</div>
                 <div className="price">
@@ -345,7 +377,8 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
   const [days, setDays] = useState(mine ? String(mine.leadTimeDays) : '');
   const [comment, setComment] = useState(mine?.comment ?? '');
   const [busy, setBusy] = useState(false);
-  const editable = r.isOpen && (!mine || mine.status === 'sent');
+  const { me } = useSession();
+  const editable = r.isOpen && (!mine || mine.status === 'sent' || mine.status === 'withdrawn');
 
   const send = async () => {
     setBusy(true);
@@ -354,6 +387,7 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
       toast(t('offerSent'));
       onChange();
     } catch (e) {
+      if (e instanceof ApiError && e.code === 'phone_required') nav('/profile');
       toast((e as Error).message, 'error');
     } finally {
       setBusy(false);
@@ -370,6 +404,7 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
     <>
       <BackButton to="/feed" />
       <h1>{r.title || `#${r.id}`}</h1>
+      <OrderCard r={r} />
       <Section>
         <div className="row between" style={{ marginBottom: 10 }}>
           {r.isOpen ? <span className="pill cyan">{t('st_wave_1')}</span> : <span className="pill">{t('closed')}</span>}
@@ -393,6 +428,15 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
       <Section title={t('yourOffer')}>
         {editable ? (
           <div className="stack">
+            {!me.phoneVerified && (
+              <div className="stack">
+                <b className="small">{t('phoneRequired')}</b>
+                <span className="muted small">{t('phoneRequiredHint')}</span>
+                <button className="btn secondary" onClick={() => nav('/profile')}>
+                  {t('confirmPhone')}
+                </button>
+              </div>
+            )}
             <label className="field">
               <span>{t('price')} *</span>
               <input className="input" type="number" inputMode="numeric" value={price} onChange={(e) => setPrice(e.target.value)} />
@@ -405,7 +449,7 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
               <span>{t('comment')}</span>
               <textarea className="input" style={{ minHeight: 80 }} placeholder={t('commentPlaceholder')} value={comment} onChange={(e) => setComment(e.target.value)} />
             </label>
-            {mine && (
+            {mine?.status === 'sent' && (
               <button className="btn danger" onClick={withdraw}>
                 {t('withdraw')}
               </button>
@@ -422,7 +466,7 @@ function SupplierView({ r, onChange }: { r: RequestView; onChange: () => void })
         )}
       </Section>
       {editable && (
-        <MainButton text={mine ? t('updateOffer') : t('sendOffer')} onClick={send} loading={busy} disabled={!(Number(price) > 0) || days === '' || Number(days) < 0} />
+        <MainButton text={mine?.status === 'sent' ? t('updateOffer') : t('sendOffer')} onClick={send} loading={busy} disabled={!(Number(price) > 0) || days === '' || Number(days) < 0} />
       )}
     </>
   );

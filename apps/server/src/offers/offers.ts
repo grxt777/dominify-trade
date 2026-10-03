@@ -1,17 +1,22 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Injectable, Param, ParseIntPipe, Post } from '@nestjs/common';
-import { chats, companies, offers, requestDeliveries, requests, type Db } from '@dominify/db';
+import { chats, companies, offers, requestDeliveries, requests, users, type Db } from '@dominify/db';
 import { createOfferSchema, OPEN_REQUEST_STATUSES, PLANS, type CreateOfferDto } from '@dominify/shared';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { Config } from '../config';
+import { maskContacts } from '../common/contacts';
 import { AppError, forbidden, notFound, ZodPipe } from '../common/http';
-import { CurrentUser, type AuthUser } from '../auth/guards';
+import { CurrentUser, RateLimit, type AuthUser } from '../auth/guards';
 import { BillingService } from '../billing/billing.service';
+import { FilesService } from '../files/files';
 import { Analytics } from '../infra/infra.module';
 import { QueueService } from '../infra/queues';
 import { RealtimeEmitter } from '../infra/realtime-emitter';
 import { CONFIG, DB } from '../infra/tokens';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RequestAccess } from '../requests/access';
+
+/** Ключ pg_advisory_xact_lock для откликов компании (второй аргумент — ID компании). */
+const LOCK_OFFERS = 1001;
 
 @Injectable()
 export class OffersService {
@@ -24,6 +29,7 @@ export class OffersService {
     private readonly realtime: RealtimeEmitter,
     private readonly queues: QueueService,
     private readonly analytics: Analytics,
+    private readonly files: FilesService,
   ) {}
 
   /** Отклик поставщика. Один отклик на компанию: повторный вызов обновляет цену и срок. */
@@ -36,55 +42,76 @@ export class OffersService {
     const [company] = await this.db.select().from(companies).where(eq(companies.id, companyId));
     if (company.blocked) throw forbidden('Компания заблокирована');
 
-    const [existing] = await this.db
-      .select()
-      .from(offers)
-      .where(and(eq(offers.requestId, requestId), eq(offers.supplierCompanyId, companyId)));
-
-    if (existing && existing.status === 'sent') {
-      const [upd] = await this.db
-        .update(offers)
-        .set({ priceUzs: dto.priceUzs, leadTimeDays: dto.leadTimeDays, comment: dto.comment ?? null, fileIds: dto.fileIds, updatedAt: new Date() })
-        .where(eq(offers.id, existing.id))
-        .returning();
-      this.realtime.toRequest(requestId, 'offer.updated', { requestId, offerId: upd.id });
-      this.realtime.toUser(req.authorUserId, 'offer.updated', { requestId, offerId: upd.id });
-      return upd;
+    // Подтверждённый телефон: покупатель должен знать, что за откликом стоит реальный человек,
+    // а бесплатный лимит привязан к номеру, а не к числу созданных компаний.
+    const [author] = await this.db.select({ phoneHash: users.phoneHash, phoneVerifiedAt: users.phoneVerifiedAt }).from(users).where(eq(users.id, userId));
+    if (!author?.phoneHash || !author.phoneVerifiedAt) {
+      throw new AppError('phone_required', 'Чтобы откликаться на заявки, подтвердите номер телефона в боте', HttpStatus.FORBIDDEN);
     }
-    if (existing) throw new AppError('offer_closed', 'Отклик уже нельзя изменить');
+    await this.files.assertOwnReady(userId, dto.fileIds);
+    const comment = dto.comment ? maskContacts(dto.comment).text : null;
+    const fields = { priceUzs: dto.priceUzs, leadTimeDays: dto.leadTimeDays, comment, fileIds: dto.fileIds };
 
-    // Лимит откликов по тарифу считается за календарный месяц.
     const plan = await this.billing.effectivePlan(companyId);
     const limit = PLANS[plan].offersPerMonth;
-    if (limit !== null) {
-      const used = await this.billing.offersThisMonth(companyId);
-      if (used >= limit) {
-        throw new AppError('plan_limit', `Лимит откликов на тарифе «${PLANS[plan].name.ru}» исчерпан: ${limit} в месяц. Чтобы расширить, свяжитесь с менеджером.`, HttpStatus.PAYMENT_REQUIRED);
+
+    const result = await this.db.transaction(async (tx) => {
+      // Сериализуем отклики одной компании (лимит) и проверяем статус заявки под блокировкой строки,
+      // чтобы отклик не проскочил в уже выбранную или закрытую заявку.
+      await tx.execute(sql`select pg_advisory_xact_lock(${LOCK_OFFERS}, ${companyId})`);
+      const [fresh] = await tx.select({ status: requests.status }).from(requests).where(eq(requests.id, requestId)).for('share');
+      if (!(OPEN_REQUEST_STATUSES as string[]).includes(fresh.status)) throw new AppError('closed', 'Заявка уже закрыта');
+
+      const [existing] = await tx
+        .select()
+        .from(offers)
+        .where(and(eq(offers.requestId, requestId), eq(offers.supplierCompanyId, companyId)));
+      if (existing && existing.status === 'sent') {
+        const [upd] = await tx.update(offers).set({ ...fields, updatedAt: new Date() }).where(eq(offers.id, existing.id)).returning();
+        return { offer: upd, updated: true, first: false };
       }
-    }
+      if (existing && existing.status !== 'withdrawn') throw new AppError('offer_closed', 'Отклик уже нельзя изменить', HttpStatus.CONFLICT);
 
-    const hadOffers = await this.db
-      .select({ c: sql<number>`count(*)::int` })
-      .from(offers)
-      .where(and(eq(offers.requestId, requestId), ne(offers.status, 'withdrawn')));
+      // Повторный отклик после отзыва не тратит лимит: компания уже заплатила за этот отклик.
+      if (!existing && limit !== null) {
+        const used = await this.billing.offersThisMonth(companyId);
+        const byPhone = plan === 'free' ? await this.billing.freeOffersThisMonthByPhone(author.phoneHash!) : 0;
+        if (used >= limit || byPhone >= limit) {
+          throw new AppError(
+            'plan_limit',
+            `Лимит откликов на тарифе «${PLANS[plan].name.ru}» исчерпан: ${limit} в месяц. Чтобы расширить, свяжитесь с менеджером.`,
+            HttpStatus.PAYMENT_REQUIRED,
+          );
+        }
+      }
 
-    const offer = await this.db.transaction(async (tx) => {
-      const [o] = await tx
-        .insert(offers)
-        .values({ requestId, supplierCompanyId: companyId, authorUserId: userId, priceUzs: dto.priceUzs, leadTimeDays: dto.leadTimeDays, comment: dto.comment ?? null, fileIds: dto.fileIds })
-        .returning();
+      const [had] = await tx
+        .select({ c: sql<number>`count(*)::int` })
+        .from(offers)
+        .where(and(eq(offers.requestId, requestId), ne(offers.status, 'withdrawn')));
+
+      const [o] = existing
+        ? await tx.update(offers).set({ ...fields, status: 'sent', authorUserId: userId, updatedAt: new Date() }).where(eq(offers.id, existing.id)).returning()
+        : await tx.insert(offers).values({ requestId, supplierCompanyId: companyId, authorUserId: userId, ...fields }).returning();
       await tx
         .update(requestDeliveries)
         .set({ respondedAt: new Date() })
         .where(and(eq(requestDeliveries.requestId, requestId), eq(requestDeliveries.supplierCompanyId, companyId)));
-      await tx.update(companies).set({ offersSent: sql`${companies.offersSent} + 1` }).where(eq(companies.id, companyId));
+      if (!existing) await tx.update(companies).set({ offersSent: sql`${companies.offersSent} + 1` }).where(eq(companies.id, companyId));
       await tx.update(requests).set({ status: 'has_offers', updatedAt: new Date() }).where(eq(requests.id, requestId));
       await tx.insert(chats).values({ requestId, supplierCompanyId: companyId, buyerUserId: req.authorUserId }).onConflictDoNothing();
-      return o;
+      return { offer: o, updated: false, first: (had?.c ?? 0) === 0 };
     });
 
+    const { offer } = result;
+    if (result.updated) {
+      this.realtime.toRequest(requestId, 'offer.updated', { requestId, offerId: offer.id });
+      this.realtime.toUser(req.authorUserId, 'offer.updated', { requestId, offerId: offer.id });
+      return offer;
+    }
+
     // Первый отклик — сразу, остальные — сводкой раз в OFFER_DIGEST_MIN минут.
-    if ((hadOffers[0]?.c ?? 0) === 0) {
+    if (result.first) {
       await this.notifications.notify(
         req.authorUserId,
         'new_offer',
@@ -105,8 +132,12 @@ export class OffersService {
     if (!o) throw notFound('Отклик');
     const role = await this.access.roleOf(userId, o.requestId);
     if (!role || role.kind !== 'supplier' || role.companyId !== o.supplierCompanyId) throw forbidden();
-    if (o.status !== 'sent') throw new AppError('bad_status', 'Отклик уже нельзя отозвать');
-    await this.db.update(offers).set({ status: 'withdrawn', updatedAt: new Date() }).where(eq(offers.id, offerId));
+    const [upd] = await this.db
+      .update(offers)
+      .set({ status: 'withdrawn', updatedAt: new Date() })
+      .where(and(eq(offers.id, offerId), eq(offers.status, 'sent')))
+      .returning({ id: offers.id });
+    if (!upd) throw new AppError('bad_status', 'Отклик уже нельзя отозвать');
     this.realtime.toRequest(o.requestId, 'offer.updated', { requestId: o.requestId, offerId });
     return { ok: true };
   }
@@ -149,6 +180,7 @@ export class OffersController {
   constructor(private readonly offers: OffersService) {}
 
   @Post('requests/:id/offers')
+  @RateLimit('offer', 30, 60)
   create(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Body(new ZodPipe(createOfferSchema)) dto: CreateOfferDto) {
     return this.offers.create(u.id, id, dto);
   }

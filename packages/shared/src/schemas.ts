@@ -36,10 +36,65 @@ export type CreateCompanyDto = z.infer<typeof createCompanySchema>;
 export const updateCompanySchema = createCompanySchema.partial();
 export type UpdateCompanyDto = z.infer<typeof updateCompanySchema>;
 
+export const GIG_PACKAGE_CODES = ['basic', 'standard', 'premium'] as const;
+export type GigPackageCode = (typeof GIG_PACKAGE_CODES)[number];
+
+/** Пакет услуги на витрине исполнителя. */
+export interface GigPackage {
+  code: GigPackageCode;
+  name: string;
+  priceUzs: number;
+  days: number;
+  revisions: number;
+  summary: string;
+  features: string[];
+}
+
+/** Загруженная продавцом картинка услуги хранится как «f:<fileId>»; демо — как путь к статике. */
+export const GIG_IMAGE_RE = /^(f:\d{1,12}|\/demo\/[\w-]{1,40}\.svg)$/;
+export const GIG_LIMITS = { titleMin: 15, titleMax: 120, descMin: 40, descMax: 3000, images: 6, tags: 5, features: 8, perCompany: 20 } as const;
+
+export const gigPackageSchema = z.object({
+  code: z.enum(GIG_PACKAGE_CODES),
+  name: z.string().trim().min(1).max(30),
+  priceUzs: z.number().int().min(10_000).max(10_000_000_000),
+  days: z.number().int().min(1).max(90),
+  revisions: z.number().int().min(0).max(10),
+  summary: z.string().trim().max(160).default(''),
+  features: z.array(z.string().trim().min(1).max(80)).max(GIG_LIMITS.features).default([]),
+});
+
+export const gigUpsertSchema = z
+  .object({
+    companyId: z.number().int().positive(),
+    categoryId: z.number().int().positive(),
+    title: z.string().trim().min(GIG_LIMITS.titleMin).max(GIG_LIMITS.titleMax),
+    description: z.string().trim().min(GIG_LIMITS.descMin).max(GIG_LIMITS.descMax),
+    gallery: z.array(z.string().regex(GIG_IMAGE_RE)).min(1).max(GIG_LIMITS.images),
+    packages: z.array(gigPackageSchema).min(1).max(3),
+    tags: z.array(z.string().trim().min(2).max(24)).max(GIG_LIMITS.tags).default([]),
+    active: z.boolean().default(true),
+  })
+  .superRefine((g, ctx) => {
+    const codes = g.packages.map((p) => p.code);
+    if (new Set(codes).size !== codes.length) ctx.addIssue({ code: 'custom', path: ['packages'], message: 'Пакеты повторяются' });
+    // Как на Fiverr: старший пакет не может стоить меньше младшего — иначе покупатель не поймёт разницу.
+    const sorted = [...g.packages].sort((a, b) => GIG_PACKAGE_CODES.indexOf(a.code) - GIG_PACKAGE_CODES.indexOf(b.code));
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].priceUzs <= sorted[i - 1].priceUzs) {
+        ctx.addIssue({ code: 'custom', path: ['packages', i, 'priceUzs'], message: 'Цена старшего пакета должна быть выше младшего' });
+      }
+    }
+  });
+export type GigUpsertDto = z.infer<typeof gigUpsertSchema>;
+
 export const parseRequestSchema = z.object({
   text: z.string().trim().max(4000).default(''),
   fileIds: z.array(z.number().int().positive()).max(10).default([]),
   regionCode: z.string().max(64).optional(),
+  /** Заказ с витрины: услуга и пакет. Заявка сначала уйдёт этому исполнителю. */
+  gigId: z.number().int().positive().optional(),
+  packageCode: z.enum(GIG_PACKAGE_CODES).optional(),
 });
 export type ParseRequestDto = z.infer<typeof parseRequestSchema>;
 

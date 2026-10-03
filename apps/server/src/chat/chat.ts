@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Inject, Injectable, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
-import { chats, companies, memberships, messages, requests, users, type Db } from '@dominify/db';
+import { Body, Controller, Get, HttpStatus, Inject, Injectable, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { chats, companies, deals, gigs, memberships, messages, requests, users, type Db } from '@dominify/db';
 import { sendMessageSchema, type SendMessageDto } from '@dominify/shared';
 import { and, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import { forbidden, notFound, ZodPipe } from '../common/http';
+import { maskContacts } from '../common/contacts';
+import { AppError, forbidden, notFound, ZodPipe } from '../common/http';
 import { CurrentUser, RateLimit, type AuthUser } from '../auth/guards';
+import { FilesService } from '../files/files';
 import { RealtimeEmitter } from '../infra/realtime-emitter';
 import { DB } from '../infra/tokens';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -15,6 +17,7 @@ export class ChatService {
     @Inject(DB) private readonly db: Db,
     private readonly realtime: RealtimeEmitter,
     private readonly notifications: NotificationsService,
+    private readonly files: FilesService,
   ) {}
 
   /** Сторона пользователя в чате или null, если доступа нет. */
@@ -29,13 +32,48 @@ export class ChatService {
     return m ? { side: 'supplier', chat: c } : null;
   }
 
+  /** Контакты открыты, только когда этого поставщика выбрали исполнителем по заявке. В вопросах по услуге — никогда. */
+  private async contactsOpen(chat: typeof chats.$inferSelect): Promise<boolean> {
+    if (!chat.requestId) return false;
+    const [d] = await this.db
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.requestId, chat.requestId), eq(deals.supplierCompanyId, chat.supplierCompanyId), ne(deals.status, 'cancelled')));
+    return !!d;
+  }
+
+  /** Чат «вопрос по услуге» до заказа: один на пару покупатель × услуга. */
+  async askAboutGig(userId: number, gigId: number) {
+    const [g] = await this.db
+      .select({ id: gigs.id, companyId: gigs.companyId })
+      .from(gigs)
+      .innerJoin(companies, eq(companies.id, gigs.companyId))
+      .where(and(eq(gigs.id, gigId), eq(gigs.active, true), eq(companies.blocked, false)));
+    if (!g) throw notFound('Услуга');
+    const [self] = await this.db
+      .select({ id: memberships.userId })
+      .from(memberships)
+      .where(and(eq(memberships.userId, userId), eq(memberships.companyId, g.companyId)));
+    if (self) throw new AppError('self_chat', 'Это услуга вашей компании', HttpStatus.FORBIDDEN);
+    await this.db
+      .insert(chats)
+      .values({ gigId, supplierCompanyId: g.companyId, buyerUserId: userId })
+      .onConflictDoNothing({ target: [chats.gigId, chats.buyerUserId], where: sql`${chats.requestId} is null` });
+    const [c] = await this.db
+      .select({ id: chats.id })
+      .from(chats)
+      .where(and(eq(chats.gigId, gigId), eq(chats.buyerUserId, userId), isNull(chats.requestId)));
+    return { chatId: c.id };
+  }
+
   async list(userId: number) {
     const myCompanies = (await this.db.select({ id: memberships.companyId }).from(memberships).where(eq(memberships.userId, userId))).map((m) => m.id);
     return this.db
       .select({
         id: chats.id,
         requestId: chats.requestId,
-        title: requests.title,
+        gigId: chats.gigId,
+        title: sql<string | null>`coalesce(${requests.title}, ${gigs.title})`,
         supplierCompanyId: chats.supplierCompanyId,
         supplierName: companies.name,
         buyerName: users.firstName,
@@ -44,10 +82,17 @@ export class ChatService {
         unread: sql<number>`(select count(*)::int from ${messages} m where m.chat_id = ${chats.id} and m.sender_user_id <> ${userId} and m.read_at is null)`,
       })
       .from(chats)
-      .innerJoin(requests, eq(requests.id, chats.requestId))
+      .leftJoin(requests, eq(requests.id, chats.requestId))
+      .leftJoin(gigs, eq(gigs.id, chats.gigId))
       .innerJoin(companies, eq(companies.id, chats.supplierCompanyId))
       .innerJoin(users, eq(users.id, chats.buyerUserId))
-      .where(or(eq(chats.buyerUserId, userId), myCompanies.length ? inArray(chats.supplierCompanyId, myCompanies) : sql`false`))
+      .where(
+        and(
+          or(eq(chats.buyerUserId, userId), myCompanies.length ? inArray(chats.supplierCompanyId, myCompanies) : sql`false`),
+          // Вопрос по услуге без единого сообщения в списке не показываем.
+          or(sql`${chats.requestId} is not null`, sql`${chats.lastMessageAt} is not null`),
+        ),
+      )
       .orderBy(sql`${chats.lastMessageAt} desc nulls last`)
       .limit(100);
   }
@@ -66,22 +111,36 @@ export class ChatService {
       .set({ readAt: new Date() })
       .where(and(eq(messages.chatId, chatId), ne(messages.senderUserId, userId), isNull(messages.readAt)));
     this.realtime.toChat(chatId, 'message.read', { chatId, byUserId: userId });
-    return { side: access.side, chat: access.chat, messages: rows.reverse() };
+    const [gig] = access.chat.gigId ? await this.db.select({ title: gigs.title }).from(gigs).where(eq(gigs.id, access.chat.gigId)) : [];
+    const [co] = await this.db.select({ name: companies.name }).from(companies).where(eq(companies.id, access.chat.supplierCompanyId));
+    return {
+      side: access.side,
+      chat: access.chat,
+      gigTitle: gig?.title ?? null,
+      supplierName: co?.name ?? null,
+      contactsOpen: await this.contactsOpen(access.chat),
+      messages: rows.reverse(),
+    };
   }
 
   async send(userId: number, chatId: number, dto: SendMessageDto) {
     const access = await this.sideOf(userId, chatId);
     if (!access) throw forbidden('Нет доступа к чату');
+    if (dto.fileId) await this.files.assertOwnReady(userId, [dto.fileId]);
+    let text = dto.text ?? null;
+    let masked = false;
+    if (text && !(await this.contactsOpen(access.chat))) ({ text, masked } = maskContacts(text));
     const [msg] = await this.db
       .insert(messages)
-      .values({ chatId, senderUserId: userId, text: dto.text ?? null, fileId: dto.fileId ?? null })
+      .values({ chatId, senderUserId: userId, text, fileId: dto.fileId ?? null })
       .returning();
     await this.db.update(chats).set({ lastMessageAt: new Date() }).where(eq(chats.id, chatId));
     this.realtime.toChat(chatId, 'message.created', msg);
 
     // Собеседнику — в бот, если он не в Mini App.
     const [sender] = await this.db.select({ firstName: users.firstName }).from(users).where(eq(users.id, userId));
-    const payload = { chatId, requestId: access.chat.requestId, from: sender?.firstName ?? '', text: (dto.text ?? '📎').slice(0, 300) };
+    const [gig] = !access.chat.requestId && access.chat.gigId ? await this.db.select({ title: gigs.title }).from(gigs).where(eq(gigs.id, access.chat.gigId)) : [];
+    const payload = { chatId, requestId: access.chat.requestId, gigTitle: gig?.title ?? '', from: sender?.firstName ?? '', text: (text ?? '📎').slice(0, 300) };
     if (access.side === 'buyer') {
       const members = await this.db.select({ userId: memberships.userId }).from(memberships).where(eq(memberships.companyId, access.chat.supplierCompanyId));
       for (const m of members) {
@@ -93,7 +152,7 @@ export class ChatService {
       this.realtime.toUser(access.chat.buyerUserId, 'message.created', msg);
       await this.notifications.notify(access.chat.buyerUserId, 'message', { ...payload, from: co?.name ?? payload.from }, { respectOnline: true });
     }
-    return msg;
+    return { ...msg, masked };
   }
 
   /** Новые сообщения после id: для опроса, если сокет недоступен. */
@@ -115,8 +174,10 @@ export class ChatController {
 
   @Get(':id/messages')
   messages(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Query('before') before?: string, @Query('after') after?: string) {
-    if (after) return this.chat.since(u.id, id, Number(after));
-    return this.chat.messages(u.id, id, before ? Number(before) : undefined);
+    const num = (v?: string) => (v && /^\d+$/.test(v) ? Number(v) : undefined);
+    const afterId = num(after);
+    if (afterId !== undefined) return this.chat.since(u.id, id, afterId);
+    return this.chat.messages(u.id, id, num(before));
   }
 
   @Post(':id/messages')

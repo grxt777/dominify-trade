@@ -3,9 +3,13 @@ import { ConsoleLogger, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Worker, type Job } from 'bullmq';
 import { loadConfig } from './config';
+import { captureException, initMonitoring } from './infra/monitoring';
 import { bullConnection } from './infra/queues';
 import { QUEUE_NAMES } from './infra/tokens';
 import { BillingService } from './billing/billing.service';
+import { DealsService } from './deals/deals';
+import { GrowthService } from './growth/growth';
+import { NotificationsService } from './notifications/notifications.service';
 import { MatchingService } from './matching/matching.service';
 import { OffersService } from './offers/offers';
 import { ParsingService } from './parsing/parsing.service';
@@ -20,6 +24,7 @@ import { QueueService } from './infra/queues';
  */
 async function bootstrap() {
   const cfg = loadConfig();
+  initMonitoring(cfg, 'worker');
   const logger = new ConsoleLogger({ json: cfg.NODE_ENV === 'production', prefix: 'worker' });
   const app = await NestFactory.createApplicationContext(WorkerModule, { logger });
   const log = new Logger('Worker');
@@ -31,6 +36,9 @@ async function bootstrap() {
   const sender = app.get(NotificationSender);
   const billing = app.get(BillingService);
   const queues = app.get(QueueService);
+  const deals = app.get(DealsService);
+  const notifications = app.get(NotificationsService);
+  const growth = app.get(GrowthService);
 
   const connection = bullConnection(cfg.REDIS_URL);
   const workers: Worker[] = [];
@@ -92,6 +100,12 @@ async function bootstrap() {
             return billing.lifecycle();
           case 'response-times':
             return matching.recomputeResponseTimes();
+          case 'deals-sweep':
+            return deals.sweepActive();
+          case 'notify-sweep':
+            return notifications.sweep();
+          case 'growth-sweep':
+            return growth.sweep();
           default:
             return null;
         }
@@ -106,10 +120,23 @@ async function bootstrap() {
   await sched.upsertJobScheduler('remind-silent', { every: 10 * 60_000 }, { name: 'remind-silent' });
   await sched.upsertJobScheduler('subscriptions', { pattern: '0 4 * * *', tz: 'Asia/Tashkent' }, { name: 'subscriptions' });
   await sched.upsertJobScheduler('response-times', { pattern: '30 3 * * *', tz: 'Asia/Tashkent' }, { name: 'response-times' });
+  await sched.upsertJobScheduler('deals-sweep', { every: 60 * 60_000 }, { name: 'deals-sweep' });
+  await sched.upsertJobScheduler('notify-sweep', { every: 5 * 60_000 }, { name: 'notify-sweep' });
+  await sched.upsertJobScheduler('growth-sweep', { every: 60 * 60_000 }, { name: 'growth-sweep' });
 
   for (const w of workers) {
-    w.on('failed', (job, err) => log.warn(`${w.name}/${job?.name} #${job?.id} упала: ${err.message}`));
-    w.on('error', (err) => log.error(`${w.name}: ${err.message}`));
+    w.on('failed', (job, err) => {
+      log.warn(`${w.name}/${job?.name} #${job?.id} упала: ${err.message}`);
+      const final = !!job && job.attemptsMade >= (job.opts.attempts ?? 1);
+      if (final) captureException(err, { queue: w.name, job: job?.name, jobId: job?.id, data: job?.data });
+      if (final && w.name === QUEUE_NAMES.notify && job?.name === 'send') {
+        notifications.markFailed((job.data as { notificationId: number }).notificationId, err.message).catch(() => undefined);
+      }
+    });
+    w.on('error', (err) => {
+      log.error(`${w.name}: ${err.message}`);
+      captureException(err, { queue: w.name });
+    });
   }
   log.log(`Воркер запущен: ${workers.map((w) => w.name).join(', ')}`);
 

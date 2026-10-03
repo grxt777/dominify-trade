@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
-import { get, type FeedItem } from '../api';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { get, type FeedItem, type MyGig } from '../api';
 import { useT } from '../i18n';
 import { useSession } from '../session';
 import { useSocketEvent } from '../socket';
@@ -22,8 +22,18 @@ export function Feed() {
 
   const catName = (id: number | null) => leaves.find((c) => c.id === id)?.name[t.lang] ?? '';
 
+  const myGigs = useQuery({ queryKey: ['my-gigs', supplierCompanyId], queryFn: () => get<MyGig[]>(`/v1/gigs/mine?companyId=${supplierCompanyId}`) });
+
   return (
     <>
+      <FeedSwitch />
+      {myGigs.data?.length === 0 && (
+        <div className="cta-card">
+          <h2>{t('gigsEmptyTitle')}</h2>
+          <div className="small">{t('gigsEmptyText')}</div>
+          <button className="btn block" onClick={() => nav('/my-gigs/new')}>+ {t('newGig')}</button>
+        </div>
+      )}
       {plan.data && plan.data.notifyDelayMin > 0 && (
         <div className="section" style={{ padding: '12px 16px' }} onClick={() => nav('/plan')}>
           <div className="row between">
@@ -81,6 +91,8 @@ export function MyOffers() {
   const nav = useNavigate();
   const q = useQuery({ queryKey: ['my-offers'], queryFn: () => get<MyOffer[]>('/v1/offers') });
   return (
+    <>
+    <FeedSwitch />
     <Section title={t('tabOffers')} body={false}>
       {q.isLoading && <Spinner />}
       {q.data?.length === 0 && <Empty>{t('noOffers')}</Empty>}
@@ -98,5 +110,19 @@ export function MyOffers() {
         </div>
       ))}
     </Section>
+    </>
+  );
+}
+
+/** Лента и свои отклики — одна вкладка: в нижней панели место занимают «Услуги». */
+function FeedSwitch() {
+  const t = useT();
+  const nav = useNavigate();
+  const loc = useLocation();
+  return (
+    <div className="seg wide" role="group" style={{ marginBottom: 12 }}>
+      <button aria-pressed={loc.pathname === '/feed'} onClick={() => nav('/feed', { replace: true })}>{t('feedNew')}</button>
+      <button aria-pressed={loc.pathname === '/offers'} onClick={() => nav('/offers', { replace: true })}>{t('tabOffers')}</button>
+    </div>
   );
 }

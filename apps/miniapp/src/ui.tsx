@@ -38,9 +38,11 @@ export function MainButton({ text, onClick, disabled, loading }: { text: string;
   );
 }
 
-export function BackButton({ to }: { to?: string }) {
+export function BackButton({ to, onClick }: { to?: string; onClick?: () => void }) {
   const nav = useNavigate();
-  const go = useCallback(() => (to ? nav(to) : nav(-1)), [nav, to]);
+  const cb = useRef(onClick);
+  cb.current = onClick;
+  const go = useCallback(() => (cb.current ? cb.current() : to ? nav(to) : nav(-1)), [nav, to]);
   useEffect(() => {
     if (!tg) return;
     tg.BackButton.onClick(go);
@@ -92,7 +94,19 @@ export function Section({ title, children, body = true }: { title?: string; chil
   );
 }
 
-export const Spinner = () => <div className="spinner" role="status" aria-label="loading" />;
+export const Spinner = () => (
+  <div className="loader" role="status" aria-label="loading">
+    <i /><i /><i /><i />
+  </div>
+);
+
+/** Первый экран, пока идёт вход: фирменные точки CMYK. */
+export const Splash = () => (
+  <div className="splash" role="status" aria-label="loading">
+    <div className="splash-dots"><i /><i /><i /><i /></div>
+    <b>Dominify</b>
+  </div>
+);
 export const Empty = ({ children }: { children: ReactNode }) => <div className="empty">{children}</div>;
 
 const STATUS_COLORS: Record<string, string> = {
@@ -161,10 +175,15 @@ export function regionName(code: string | null | undefined, lang: 'ru' | 'uz' | 
   return REGIONS.find((r) => r.code === code)?.name[lang] ?? code;
 }
 
+// Для uz-UZ браузеры часто отдают «M09 29», поэтому месяцы по-узбекски — свои.
+const UZ_MONTHS = ['yan', 'fev', 'mar', 'apr', 'may', 'iyun', 'iyul', 'avg', 'sen', 'okt', 'noy', 'dek'];
+const UZC_MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
 export function fmtDate(iso: string | null | undefined, lang: string): string {
   if (!iso) return '';
   const d = new Date(iso);
-  return d.toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', { day: 'numeric', month: 'short' });
+  if (lang === 'ru') return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  return `${d.getDate()} ${(lang === 'uzc' ? UZC_MONTHS : UZ_MONTHS)[d.getMonth()]}`;
 }
 
 export function fmtTime(iso: string, lang: string): string {
@@ -175,14 +194,50 @@ export function fmtTime(iso: string, lang: string): string {
 
 const path = (d: string) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d={d} />
+    <path d={d} pathLength={1} />
   </svg>
 );
 export const Icons = {
+  store: path('M4 9l1.5-5h13L20 9M4 9v11h16V9M4 9c0 1.7 1.3 3 3 3s3-1.3 3-3c0 1.7 1.3 3 3 3s3-1.3 3-3c0 1.7 1.3 3 3 3M10 20v-5h4v5'),
+  home: path('M3 11l9-7 9 7M5 9.5V20h5v-6h4v6h5V9.5'),
+  search: path('M11 18a7 7 0 100-14 7 7 0 000 14zM20 20l-4-4'),
+  clock: path('M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3 2'),
+  refresh: path('M20 11a8 8 0 00-14.5-4.5L4 8M4 4v4h4M4 13a8 8 0 0014.5 4.5L20 16M20 20v-4h-4'),
+  check: path('M5 12.5l4.5 4.5L19 7.5'),
   list: path('M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01'),
   inbox: path('M4 13l2.5-7h11L20 13M4 13v5a2 2 0 002 2h12a2 2 0 002-2v-5M4 13h4l1.5 2.5h5L16 13h4'),
   send: path('M4 12l16-8-6 16-2.5-6.5L4 12z'),
   handshake: path('M3 11l4-4 4 3 3-3 7 5-3 3M7 7l-4 4 6 6 2-2M14 16l2 2M11 13l2 2'),
   chat: path('M4 5h16v11H9l-5 4V5z'),
   user: path('M12 12a4 4 0 100-8 4 4 0 000 8zM4 20c0-3.3 3.6-6 8-6s8 2.7 8 6'),
+  heart: path('M12 20s-7-4.4-7-10a4 4 0 017-2.6A4 4 0 0119 10c0 5.6-7 10-7 10z'),
+  shield: path('M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3zM9 12l2 2 4-4'),
+  gift: path('M4 11h16v9H4zM3 7h18v4H3zM12 7v13M12 7c-1.5-3-5-3-5-1s3 1 5 1zM12 7c1.5-3 5-3 5-1s-3 1-5 1z'),
+  undo: path('M9 14L4 9l5-5M4 9h11a5 5 0 010 10h-3'),
+  bolt: path('M13 3L5 13h6l-1 8 8-10h-6l1-8z'),
 };
+
+/** Отметка «Проверенный исполнитель»: ИНН подтверждён модератором. */
+export function VerifiedMark({ withText = false }: { withText?: boolean }) {
+  const t = useT();
+  return (
+    <span className={`verified ${withText ? 'with-text' : ''}`} title={t('verifiedHint')} aria-label={t('verified')}>
+      <svg viewBox="0 0 24 24" aria-hidden>
+        <path d="M12 2l2.4 1.8 3-.2.9 2.9 2.5 1.7-.9 2.9.9 2.9-2.5 1.7-.9 2.9-3-.2L12 22l-2.4-1.8-3 .2-.9-2.9-2.5-1.7.9-2.9-.9-2.9 2.5-1.7.9-2.9 3 .2z" />
+        <path d="M8 12.2l2.6 2.6L16 9.4" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {withText && t('verified')}
+    </span>
+  );
+}
+
+/** «3 часа назад» без библиотек: минуты, часы, дни. */
+export function useAgo() {
+  const t = useT();
+  return (iso: string) => {
+    const min = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+    if (min < 60) return t.f('agoMinTpl', min);
+    if (min < 24 * 60) return t.f('agoHourTpl', Math.round(min / 60));
+    return t.f('agoDayTpl', Math.round(min / 1440));
+  };
+}

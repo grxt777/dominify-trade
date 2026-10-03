@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-opacity=".18"/></filter>
+  </defs>
+  <rect width="640" height="400" fill="#dfe7ef"/>
+  <g filter="url(#sh)">
+    <rect x="370" y="40" width="210" height="300" rx="8" fill="#fff" transform="rotate(6 475 190)"/>
+  </g>
+  <g transform="rotate(6 475 190)">
+    <rect x="370" y="40" width="210" height="120" rx="8" fill="#ff8a00"/>
+    <text x="475" y="96" text-anchor="middle" fill="#fff" font-size="26" font-weight="900">OSH MARKAZI</text>
+    <text x="475" y="126" text-anchor="middle" fill="#fff" font-size="15">Ochilish aksiyasi</text>
+    <rect x="392" y="180" width="166" height="12" rx="6" fill="#e2e6ec"/><rect x="392" y="204" width="130" height="12" rx="6" fill="#e2e6ec"/>
+    <rect x="392" y="240" width="100" height="40" rx="8" fill="#1d2b53"/>
+    <text x="442" y="266" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">-30%</text>
+  </g>
+  <g filter="url(#sh)">
+    <rect x="60" y="90" width="300" height="172" rx="12" fill="#1d2b53" transform="rotate(-8 210 176)"/>
+    <rect x="90" y="150" width="300" height="172" rx="12" fill="#fff" transform="rotate(-2 240 236)"/>
+  </g>
+  <g transform="rotate(-2 240 236)">
+    <rect x="90" y="150" width="14" height="172" fill="#ffcf3f"/>
+    <text x="126" y="200" fill="#1d2b53" font-size="26" font-weight="900">Doniyor K.</text>
+    <text x="126" y="226" fill="#8a8f9c" font-size="15">Bosh menejer</text>
+    <text x="126" y="272" fill="#1d2b53" font-size="15">+998 90 000 00 00</text>
+    <text x="126" y="296" fill="#1d2b53" font-size="15">print-express.uz</text>
+    <rect x="320" y="230" width="52" height="52" rx="6" fill="#1d2b53"/>
+    <path d="M330 240h12v12h-12zM350 240h12v12h-12zM330 260h12v12h-12zM352 262h8v8h-8z" fill="#fff"/>
+  </g>
+  <rect x="24" y="346" width="200" height="36" rx="18" fill="#111" opacity=".78"/>
+  <text x="124" y="370" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">Ertaga tayyor</text>
+</svg>
