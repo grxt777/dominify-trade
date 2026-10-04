@@ -27,6 +27,11 @@ describe('initData', () => {
     expect(v.startParam).toBe('req_10');
   });
 
+  it('принимает initData новых клиентов с полем signature', () => {
+    const raw = signInitData({ ...fields, signature: 'Ed25519SignatureFromTelegram' }, BOT);
+    expect(validateInitData(raw, BOT, 86_400, now).user.id).toBe(42);
+  });
+
   it('отклоняет подделку', () => {
     const raw = signInitData(fields, BOT).replace('Umid', 'Hacker');
     expect(() => validateInitData(raw, BOT, 86_400, now)).toThrow(InitDataError);

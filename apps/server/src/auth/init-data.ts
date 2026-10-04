@@ -25,7 +25,8 @@ export class InitDataError extends Error {}
  * Проверка initData из Telegram Mini App.
  * secret_key = HMAC_SHA256(key="WebAppData", msg=bot_token)
  * hash = hex(HMAC_SHA256(key=secret_key, msg=data_check_string)),
- * data_check_string — все поля кроме hash (и signature), отсортированные, в виде key=value через \n.
+ * data_check_string — все поля кроме hash, отсортированные, в виде key=value через \n.
+ * Поле signature (Ed25519 для сторонней проверки) входит в строку: без него подпись новых клиентов не сходится.
  * https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
  */
 export function validateInitData(raw: string, botToken: string, maxAgeSec: number, now = Date.now()): ValidInitData {
@@ -36,7 +37,7 @@ export function validateInitData(raw: string, botToken: string, maxAgeSec: numbe
 
   const pairs: string[] = [];
   params.forEach((value, key) => {
-    if (key !== 'hash' && key !== 'signature') pairs.push(`${key}=${value}`);
+    if (key !== 'hash') pairs.push(`${key}=${value}`);
   });
   pairs.sort();
   const dataCheckString = pairs.join('\n');
