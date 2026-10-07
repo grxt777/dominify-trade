@@ -28,12 +28,14 @@ export const GEMINI_SCHEMA = {
     deadline: { type: ['string', 'null'], description: 'Срок в формате YYYY-MM-DD, если назван' },
     budgetUzs: { type: ['number', 'null'], description: 'Бюджет в сумах, если назван' },
     quantity: { type: ['number', 'null'], description: 'Количество или тираж' },
+    delivery: { type: ['boolean', 'null'], description: 'true — нужна доставка/монтаж на месте, false — заберёт сам, null — не сказано' },
+    deliveryAddress: { type: ['string', 'null'], description: 'Адрес или ориентир доставки, как написал покупатель' },
     missingFields: { type: 'array', items: { type: 'string' }, description: 'key обязательных полей, которых нет в тексте' },
     question: { type: ['string', 'null'], description: 'Один уточняющий вопрос о самом важном недостающем поле, на языке пользователя' },
     confidence: { type: 'number', description: 'Уверенность от 0 до 1' },
     lang: { type: 'string', enum: ['ru', 'uz', 'uzc'], description: 'Язык пользователя: ru, uz (латиница), uzc (кириллица)' },
   },
-  required: ['categorySlug', 'title', 'fields', 'regionCode', 'deadline', 'budgetUzs', 'quantity', 'missingFields', 'question', 'confidence', 'lang'],
+  required: ['categorySlug', 'title', 'fields', 'regionCode', 'deadline', 'budgetUzs', 'quantity', 'delivery', 'deliveryAddress', 'missingFields', 'question', 'confidence', 'lang'],
 };
 
 interface GeminiResponse {
@@ -78,12 +80,34 @@ export async function geminiParse(opts: {
     try {
       return await geminiOnce(opts, parts);
     } catch (e) {
-      const timedOut = (e as Error).name === 'AbortError' || (e as Error).name === 'TimeoutError';
-      const retriable = timedOut || (e instanceof GeminiHttpError && (e.status === 503 || e.status === 429 || e.status === 500));
-      if (!retriable || attempt >= delays.length) throw e;
+      if (!isTransient(e) || attempt >= delays.length) throw e;
       await new Promise((r) => setTimeout(r, delays[attempt]));
     }
   }
+}
+
+/** Перегрузка, лимит или зависание — повод попробовать ещё раз или другую модель. */
+function isTransient(e: unknown): boolean {
+  const name = (e as Error)?.name;
+  return name === 'AbortError' || name === 'TimeoutError' || (e instanceof GeminiHttpError && [429, 500, 503].includes(e.status));
+}
+
+/**
+ * Разбор с запасными моделями: при перегрузке или лимите основной модели (на бесплатном тарифе
+ * квоты у моделей раздельные) сразу пробуем следующую. Любая ошибка модели — повод взять следующую:
+ * запасная может, например, не поддерживать какой-то параметр. Наружу уходят все причины.
+ */
+export async function geminiParseChain(opts: Parameters<typeof geminiParse>[0], models: string[]): Promise<LlmCallResult> {
+  const list = [...new Set(models.filter(Boolean))];
+  const errors: string[] = [];
+  for (const model of list) {
+    try {
+      return await geminiParse({ ...opts, model, retryDelaysMs: [] });
+    } catch (e) {
+      errors.push(`${model}: ${(e as Error).name === 'AbortError' ? 'таймаут' : (e as Error).message.slice(0, 120)}`);
+    }
+  }
+  throw new Error(errors.join(' | ') || 'Нет моделей Gemini');
 }
 
 class GeminiHttpError extends Error {
@@ -97,7 +121,7 @@ class GeminiHttpError extends Error {
 
 async function geminiOnce(opts: Parameters<typeof geminiParse>[0], parts: unknown[]): Promise<LlmCallResult> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 15_000);
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 12_000);
   try {
     const res = await (opts.fetchImpl ?? fetch)(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(opts.model)}:generateContent`,

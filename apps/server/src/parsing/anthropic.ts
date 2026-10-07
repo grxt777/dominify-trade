@@ -28,12 +28,14 @@ const TOOL_SCHEMA = {
     deadline: { type: ['string', 'null'], description: 'Срок в формате YYYY-MM-DD, если назван' },
     budgetUzs: { type: ['number', 'null'], description: 'Бюджет в сумах, если назван' },
     quantity: { type: ['number', 'null'], description: 'Количество или тираж' },
+    delivery: { type: ['boolean', 'null'], description: 'true — нужна доставка/монтаж на месте, false — заберёт сам, null — не сказано' },
+    deliveryAddress: { type: ['string', 'null'], description: 'Адрес или ориентир доставки, как написал покупатель' },
     missingFields: { type: 'array', items: { type: 'string' }, description: 'key обязательных полей, которых нет в тексте' },
     question: { type: ['string', 'null'], description: 'Один уточняющий вопрос о самом важном недостающем поле, на языке пользователя' },
     confidence: { type: 'number', description: 'Уверенность в категории и полях от 0 до 1' },
     lang: { type: 'string', enum: ['ru', 'uz', 'uzc'], description: 'Язык пользователя: ru, uz (латиница), uzc (кириллица)' },
   },
-  required: ['categorySlug', 'title', 'fields', 'regionCode', 'deadline', 'budgetUzs', 'quantity', 'missingFields', 'question', 'confidence', 'lang'],
+  required: ['categorySlug', 'title', 'fields', 'regionCode', 'deadline', 'budgetUzs', 'quantity', 'delivery', 'deliveryAddress', 'missingFields', 'question', 'confidence', 'lang'],
 };
 
 function catalogPrompt(catalog: CatalogEntry[]): string {
@@ -61,6 +63,8 @@ export function buildSystemPrompt(catalog: CatalogEntry[], regions: string[], to
     'Выбери одну листовую категорию из каталога, заполни поля шаблона по key, остальное оставь null.',
     'Поля со звёздочкой обязательны: если их нет в тексте, перечисли их в missingFields и задай один короткий вопрос о самом важном.',
     'Вопрос — одно дружелюбное предложение без канцелярита, как спросил бы опытный менеджер типографии. Не спрашивай то, что уже сказано или видно на фото.',
+    'Понимай суть: «визитки 300 шт к пятнице, привезите в офис на Чиланзаре» — категория визитки, тираж 300, срок — ближайшая пятница, доставка нужна, адрес «офис на Чиланзаре», регион Чиланзар.',
+    'Размеры «3х6», «3 на 6», «90×50» переводи в поле размера; «двусторонние», «4+4» — в цветность/стороны; материалы и плотность — в соответствующие поля.',
     'Ничего не выдумывай. Если заявка не про наши категории, верни categorySlug null и низкую уверенность.',
     `Сегодня ${today}. Часовой пояс Ташкента.`,
     '',

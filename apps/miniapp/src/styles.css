@@ -842,6 +842,27 @@ html, body { overflow-x: hidden; }
 .funnel-bar span { font-size: 10px; color: var(--hint); line-height: 1.2; }
 .funnel-bar .hot b { color: var(--magenta); }
 
+
+/* ───────── карта доставки ───────── */
+.map-sheet { position: fixed; inset: 0; z-index: 80; background: var(--bg); animation: map-in 0.35s var(--smooth); }
+@keyframes map-in { from { opacity: 0; transform: translateY(24px); } }
+.map-canvas { position: absolute; inset: 0; }
+.map-pin { position: absolute; left: 50%; top: 50%; z-index: 500; pointer-events: none; transform: translate(-50%, -100%); transition: transform 0.2s var(--spring); }
+.map-pin i { display: block; width: 30px; height: 30px; border-radius: 50% 50% 50% 0; background: var(--magenta); transform: rotate(-45deg); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.3); position: relative; }
+.map-pin i::after { content: ''; position: absolute; inset: 9px; border-radius: 50%; background: #fff; }
+.map-pin::after { content: ''; position: absolute; left: 50%; bottom: -4px; width: 10px; height: 4px; margin-left: -5px; border-radius: 50%; background: rgba(0, 0, 0, 0.3); transition: transform 0.2s; }
+.map-pin.lift { transform: translate(-50%, calc(-100% - 12px)); }
+.map-pin.lift::after { transform: translateY(12px) scale(1.4); opacity: 0.5; }
+.map-top { position: absolute; z-index: 600; left: 12px; right: 12px; top: calc(12px + env(safe-area-inset-top)); display: flex; gap: 8px; align-items: stretch; }
+.map-close { width: 44px; border: 0; border-radius: 12px; background: var(--section); font-size: 24px; line-height: 1; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15); }
+.map-address { flex: 1; min-width: 0; background: var(--section); border-radius: 12px; padding: 8px 12px; display: grid; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15); }
+.map-address b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-bottom { position: absolute; z-index: 600; left: 12px; right: 12px; bottom: calc(14px + env(safe-area-inset-bottom)); display: grid; grid-template-columns: auto 1fr; gap: 8px; }
+.map-bottom .btn { padding: 14px 16px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); }
+.map-bottom .btn.secondary { background: var(--section); }
+.map-chip { border-color: color-mix(in srgb, var(--magenta) 40%, transparent) !important; }
+.delivery-row { margin: 0; background: var(--bg); }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
   .reveal, .fade-img, .reveal .g-icon, .timeline li.reveal .tl-dot, .timeline li.reveal::before { opacity: 1 !important; transform: none !important; }

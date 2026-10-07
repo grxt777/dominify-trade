@@ -92,3 +92,20 @@ describe('Gemini', () => {
     expect(geminiToResult({ ...answer, confidence: 1.4 }).confidence).toBe(1);
   });
 });
+
+describe('Gemini: запасные модели', () => {
+  it('при 429 у основной модели берёт следующую', async () => {
+    const ok = { candidates: [{ content: { parts: [{ text: JSON.stringify(answer) }] } }] };
+    const urls: string[] = [];
+    const f = (async (url: string) => {
+      urls.push(url);
+      return url.includes('main-model')
+        ? new Response(JSON.stringify({ error: { message: 'quota' } }), { status: 429 })
+        : new Response(JSON.stringify(ok), { status: 200 });
+    }) as unknown as typeof fetch;
+    const { geminiParseChain } = await import('./parsing/gemini');
+    const r = await geminiParseChain({ ...base, fetchImpl: f }, ['main-model', 'backup-model']);
+    expect(urls.map((u) => u.match(/models\/([^:]+)/)?.[1])).toEqual(['main-model', 'backup-model']);
+    expect(r.result.categorySlug).toBe('print.business-cards');
+  });
+});

@@ -1,6 +1,6 @@
 import type { FieldDef } from '@dominify/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, get, imgSrc, post, type Offer, type RequestView } from '../api';
 import { useT } from '../i18n';
@@ -12,6 +12,9 @@ import { BackButton, Empty, fmtDate, Icons, MainButton, money, regionName, Secti
 import { CategorySelect, FieldInput, RegionSelect, useLeafCategories } from './fields';
 import { AiThinking, AiQuestion, FunnelBar, MatchPipeline, Understood } from './ai';
 
+import type { MapPoint } from './MapPicker';
+
+const MapPicker = lazy(() => import('./MapPicker').then((m) => ({ default: m.MapPicker })));
 const WAITING = ['submitted', 'wave_1', 'wave_2', 'moderation'];
 
 export function RequestPage() {
@@ -112,6 +115,21 @@ function Details({ r }: { r: RequestView }) {
       {r.regionCode && <FragmentKV k={t('region')} v={regionName(r.regionCode, t.lang)} />}
       {r.deadline && <FragmentKV k={t('deadline')} v={r.deadline} />}
       {r.budgetUzs ? <FragmentKV k={t('budget')} v={money(r.budgetUzs)} /> : null}
+      {r.delivery?.needed && (
+        <>
+          <dt>{t('deliveryLabel')}</dt>
+          <dd>
+            {r.delivery.address ?? t('deliveryNeed')}
+            {r.delivery.lat != null && r.delivery.lng != null && (
+              <>
+                {' · '}
+                <a onClick={() => openLink(`https://yandex.uz/maps/?pt=${r.delivery.lng},${r.delivery.lat}&z=17&l=map`)}>{t('deliveryOpenMap')} ›</a>
+              </>
+            )}
+          </dd>
+        </>
+      )}
+      {r.delivery?.needed === false && <FragmentKV k={t('deliveryLabel')} v={t('pickupLabel')} />}
     </dl>
   );
 }
@@ -137,6 +155,11 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
   const [regionCode, setRegionCode] = useState<string>(r.regionCode ?? 'tashkent');
   const [deadline, setDeadline] = useState<string>(r.deadline ?? '');
   const [budget, setBudget] = useState<string>(r.budgetUzs ? String(r.budgetUzs) : '');
+  const [delivery, setDelivery] = useState<boolean>(!!r.delivery?.needed);
+  const [point, setPoint] = useState<MapPoint | null>(
+    r.delivery?.lat != null && r.delivery?.lng != null ? { lat: r.delivery.lat, lng: r.delivery.lng, address: r.delivery.address ?? undefined } : null,
+  );
+  const [map, setMap] = useState(false);
   const [busy, setBusy] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -150,7 +173,10 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
     if (r.regionCode) setRegionCode(r.regionCode);
     if (r.deadline) setDeadline(r.deadline);
     if (r.budgetUzs) setBudget(String(r.budgetUzs));
-  }, [r.confidence, r.category?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (r.delivery?.needed != null) setDelivery(r.delivery.needed);
+    if (r.delivery?.lat != null && r.delivery?.lng != null) setPoint({ lat: r.delivery.lat, lng: r.delivery.lng, address: r.delivery.address ?? undefined });
+    // Ответ кнопкой меняет заявку без нового разбора — подтягиваем и после каждого ответа.
+  }, [r.confidence, r.category?.id, r.answers?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const defs: FieldDef[] = useMemo(() => {
     const leaf = leaves.find((c) => c.id === categoryId);
@@ -171,6 +197,8 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
         regionCode,
         deadline: deadline || null,
         budgetUzs: budget ? Number(budget) : null,
+        deliveryNeeded: delivery,
+        delivery: delivery && point ? point : null,
       });
       confetti({ count: 90 });
       onChange();
@@ -194,7 +222,7 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
   }
 
   // Вопросы закончились, а обязательные поля не заполнены — форма открыта сразу.
-  const formOpen = showForm || (!r.question && !parsing && (missing.length > 0 || !categoryId));
+  const formOpen = showForm || (!r.ask && !parsing && (missing.length > 0 || !categoryId));
 
   return (
     <>
@@ -212,7 +240,7 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
       <Understood r={r} />
       {parsing || thinking ? (
         <AiThinking compact />
-      ) : r.question ? (
+      ) : r.ask ? (
         <AiQuestion r={r} onAnswered={onChange} onThinking={() => setThinking(true)} />
       ) : (
         <div className={`ai-ready ${missing.length || !categoryId ? 'warn' : ''}`}>
@@ -235,7 +263,32 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
               <span>{t('budget')}</span>
               <input className="input" type="number" inputMode="numeric" value={budget} onChange={(e) => setBudget(e.target.value)} />
             </label>
+            <label className="check">
+              <input type="checkbox" checked={delivery} onChange={(e) => setDelivery(e.target.checked)} />
+              {t('deliveryNeed')}
+            </label>
+            {delivery && (
+              <button className="cta-row delivery-row" onClick={() => setMap(true)}>
+                <span className="cell-icon">📍</span>
+                <span className="cell-main">
+                  {point ? (
+                    <>
+                      <b>{point.address ?? `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`}</b>
+                      <span className="small muted" style={{ display: 'block' }}>{t('deliveryChangePoint')}</span>
+                    </>
+                  ) : (
+                    <b>{t('mapPick')}</b>
+                  )}
+                </span>
+                <span className="chev" />
+              </button>
+            )}
           </div>
+          {map && (
+            <Suspense fallback={null}>
+              <MapPicker initial={point} onClose={() => setMap(false)} onPick={(p) => { setPoint(p); setMap(false); }} />
+            </Suspense>
+          )}
           <Files files={r.files} />
         </Section>
       ) : (

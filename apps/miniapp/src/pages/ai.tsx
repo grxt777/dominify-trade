@@ -1,9 +1,10 @@
 import type { FieldDef } from '@dominify/shared';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { post, type Funnel, type RequestView } from '../api';
-import { useT } from '../i18n';
+import { translate, useT } from '../i18n';
 import { CountUp, reducedMotion } from '../motion';
 import { haptic } from '../tg';
+import type { MapPoint } from './MapPicker';
 import { fmtTime, money, regionName, useToast } from '../ui';
 
 /**
@@ -105,6 +106,8 @@ export function understoodChips(r: RequestView, lang: 'ru' | 'uz' | 'uzc'): Chip
   if (r.regionCode) out.push({ k: 'region', label: regionName(r.regionCode, lang), tone: 'magenta' });
   if (r.deadline) out.push({ k: 'deadline', label: `→ ${r.deadline.split('-').reverse().slice(0, 2).join('.')}`, tone: 'yellow' });
   if (r.budgetUzs) out.push({ k: 'budget', label: `≤ ${money(r.budgetUzs)}` });
+  if (r.delivery?.needed) out.push({ k: 'delivery', label: `🚚 ${r.delivery.address ?? translate(lang, 'deliveryLabel')}` });
+  else if (r.delivery?.needed === false) out.push({ k: 'delivery', label: translate(lang, 'pickupLabel') });
   return out;
 }
 
@@ -139,28 +142,25 @@ export function Understood({ r }: { r: RequestView }) {
   );
 }
 
-/* ───────── Уточнение: максимум два вопроса ───────── */
+/* ───────── Уточнения: ИИ спрашивает то, что важно для цены и срока ───────── */
+
+const MapPicker = lazy(() => import('./MapPicker').then((m) => ({ default: m.MapPicker })));
+
+type AnswerBody = { answer: string; field?: string; value?: string | number | boolean | MapPoint; skip?: boolean };
 
 export function AiQuestion({ r, onAnswered, onThinking }: { r: RequestView; onAnswered: () => void; onThinking: () => void }) {
   const t = useT();
   const toast = useToast();
-  const q = r.question ?? '';
-  const typed = useTypeOnce(q);
-  const qa = r.quickAnswers;
-  const hasOptions = !!qa?.options.length;
-  const numeric = qa && !hasOptions && qa.type === 'number';
-  const [own, setOwn] = useState(!hasOptions);
+  const ask = r.ask!;
+  const typed = useTypeOnce(ask.text);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  const [map, setMap] = useState(false);
   const asked = r.answers?.length ?? 0;
-  const last = asked + 1 >= (r.maxQuestions ?? 2);
 
-  useEffect(() => {
-    setOwn(!hasOptions);
-    setText('');
-  }, [q, hasOptions]);
+  useEffect(() => setText(''), [ask.key, ask.text]);
 
-  const send = async (body: { answer: string; field?: string; value?: string | number | boolean }, key: string) => {
+  const send = async (body: AnswerBody, key: string) => {
     setBusy(key);
     haptic();
     try {
@@ -174,62 +174,90 @@ export function AiQuestion({ r, onAnswered, onThinking }: { r: RequestView; onAn
     }
   };
 
+  const field = ask.kind === 'free' ? undefined : ask.key;
   const sendText = () => {
     const v = text.trim();
     if (!v) return;
-    if (numeric && qa) {
-      const n = Number(v.replace(/\s/g, '').replace(',', '.'));
-      if (Number.isFinite(n) && n > 0) return send({ answer: qa.unit ? `${n} ${qa.unit}` : String(n), field: qa.field, value: n }, 'text');
+    if (ask.input === 'number' && field) {
+      const n = Number(v.replace(/[\s ]/g, '').replace(',', '.'));
+      if (Number.isFinite(n) && n > 0) return send({ answer: ask.unit ? `${v} ${ask.unit}` : v, field, value: n }, 'text');
     }
+    if (ask.input === 'date' && field && /^\d{4}-\d{2}-\d{2}$/.test(v)) return send({ answer: v, field, value: v }, 'text');
+    // Свободный текст понимает ИИ: «к пятнице», «примерно миллион» — тоже ответ.
     return send({ answer: v }, 'text');
   };
 
   return (
-    <div className="ai-ask">
+    <div className="ai-ask" key={ask.key}>
       <div className="ai-bubble-row">
         <AiMark />
         <div className="ai-bubble">
-          <div className="ai-bubble-head">{last && asked > 0 ? t('aiAskLast') : t('aiAsk')}</div>
+          <div className="ai-bubble-head">{asked === 0 ? t('aiAsk') : t.f('aiAskNTpl', asked + 1)}</div>
           {typed}
-          {typed.length < q.length && <i className="caret" />}
+          {typed.length < ask.text.length && <i className="caret" />}
         </div>
       </div>
-      {hasOptions && qa && (
+
+      {(ask.options.length > 0 || ask.input === 'map' || ask.optional) && (
         <div className="ai-options">
-          {qa.options.map((o, i) => (
+          {ask.options.map((o, i) => (
             <button
               key={String(o.value)}
               className="chip"
               style={{ ['--d' as string]: `${0.2 + i * 0.05}s` }}
               disabled={!!busy}
-              onClick={() => send({ answer: o.label, field: qa.field, value: o.value }, String(o.value))}
+              onClick={() => send({ answer: o.label, field, value: o.value }, String(o.value))}
             >
               {busy === String(o.value) ? '…' : o.label}
             </button>
           ))}
-          {!own && (
-            <button className="chip ghost" onClick={() => setOwn(true)} style={{ ['--d' as string]: `${0.2 + qa.options.length * 0.05}s` }}>
-              {t('aiOwnAnswer')}
+          {ask.input === 'map' && (
+            <button className="chip map-chip" style={{ ['--d' as string]: '0.2s' }} disabled={!!busy} onClick={() => setMap(true)}>
+              📍 {t('mapPick')}
+            </button>
+          )}
+          {ask.optional && (
+            <button
+              className="chip ghost"
+              style={{ ['--d' as string]: `${0.25 + ask.options.length * 0.05}s` }}
+              disabled={!!busy}
+              onClick={() => send({ answer: '', field: ask.key, skip: true }, 'skip')}
+            >
+              {busy === 'skip' ? '…' : t('aiSkip')}
             </button>
           )}
         </div>
       )}
-      {own && (
+
+      {ask.input && ask.input !== 'map' && (
         <div className="ai-answer">
           <input
             className="input"
-            autoFocus={hasOptions}
-            inputMode={numeric ? 'decimal' : undefined}
-            placeholder={t('answerPlaceholder')}
+            type={ask.input === 'date' ? 'date' : 'text'}
+            inputMode={ask.input === 'number' ? 'decimal' : undefined}
+            placeholder={ask.options.length ? t('aiOwnAnswer') : t('answerPlaceholder')}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendText()}
           />
-          {numeric && qa?.unit && <span className="ai-unit">{qa.unit}</span>}
+          {ask.unit && <span className="ai-unit">{ask.unit}</span>}
           <button className="btn" onClick={sendText} disabled={!!busy || !text.trim()} aria-label={t('answer')}>
             {busy === 'text' ? '…' : '↑'}
           </button>
         </div>
+      )}
+
+      {map && (
+        <Suspense fallback={null}>
+          <MapPicker
+            initial={r.delivery.lat != null && r.delivery.lng != null ? { lat: r.delivery.lat, lng: r.delivery.lng, address: r.delivery.address ?? undefined } : null}
+            onClose={() => setMap(false)}
+            onPick={(p) => {
+              setMap(false);
+              void send({ answer: p.address ?? '', field: 'location', value: p }, 'map');
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );

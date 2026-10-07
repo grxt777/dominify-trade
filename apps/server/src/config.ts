@@ -64,6 +64,8 @@ const schema = z.object({
   GEMINI_MODEL_FAST: z.string().default('gemini-3.8-flash'),
   // Для экономии и фото, и сложные заявки тоже идут в Flash. Pro включается переменной, если качества не хватит.
   GEMINI_MODEL_SMART: z.string().default('gemini-3.8-flash'),
+  /** Запасные модели через запятую: на них уходит разбор, когда основная перегружена или упёрлась в лимит. */
+  GEMINI_MODEL_FALLBACKS: z.string().default('gemini-3.5-flash,gemini-3.1-flash-lite'),
   LLM_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.7),
   AI_DAILY_PARSE_LIMIT_PER_USER: z.coerce.number().default(40),
   STT_API_URL: z.string().default(''),

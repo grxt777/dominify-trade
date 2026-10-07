@@ -2,7 +2,14 @@ import { formatUzs, REGIONS, type FieldDef, type Lang } from '@dominify/shared';
 
 /** Короткое описание заявки для уведомлений: «Тираж: 1000 · Формат: A5 · Чиланзарский р-н · до 2026-10-05». */
 export function summarize(
-  req: { fields: Record<string, unknown>; regionCode: string | null; deadline: string | null; budgetUzs: number | null },
+  req: {
+    fields: Record<string, unknown>;
+    regionCode: string | null;
+    deadline: string | null;
+    budgetUzs: number | null;
+    deliveryNeeded?: boolean | null;
+    deliveryAddress?: string | null;
+  },
   defs: FieldDef[],
   lang: Lang,
 ): string {
@@ -24,5 +31,11 @@ export function summarize(
   }
   if (req.deadline) parts.push(`${{ ru: 'срок', uz: 'muddat', uzc: 'муддат' }[lang]} ${req.deadline}`);
   if (req.budgetUzs) parts.push(`${{ ru: 'бюджет', uz: 'byudjet', uzc: 'бюджет' }[lang]} ${formatUzs(req.budgetUzs)}`);
+  if (req.deliveryNeeded) {
+    const label = { ru: 'доставка', uz: 'yetkazib berish', uzc: 'етказиб бериш' }[lang];
+    parts.push(req.deliveryAddress ? `${label}: ${req.deliveryAddress}` : label);
+  } else if (req.deliveryNeeded === false) {
+    parts.push({ ru: 'самовывоз', uz: 'olib ketish', uzc: 'олиб кетиш' }[lang]);
+  }
   return parts.join(' · ');
 }

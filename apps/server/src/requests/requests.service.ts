@@ -36,11 +36,14 @@ import { QueueService } from '../infra/queues';
 import { RealtimeEmitter } from '../infra/realtime-emitter';
 import { CONFIG, DB, REDIS } from '../infra/tokens';
 import { NotificationsService } from '../notifications/notifications.service';
-import { MAX_CLARIFICATIONS, type ParseOutcome } from '../parsing/parsing.service';
+import type { ParseOutcome } from '../parsing/parsing.service';
+import { MAX_QUESTIONS, nextAsk, SLOT_KEYS, type Ask } from './clarify';
 import { RequestAccess } from './access';
 import { summarize } from './summary';
 
 type RequestRow = typeof requests.$inferSelect;
+/** Какие вопросы уже задавали (в том числе пропущенные). */
+const askedOf = (req: RequestRow): string[] => (Array.isArray(req.fields._asked) ? (req.fields._asked as string[]) : []);
 /** Воронка подбора одной волны: сколько поставщиков рассмотрели и сколько получили заявку. */
 type Funnel = { pool: number; region: number; ready: number; sent: number };
 
@@ -129,60 +132,107 @@ export class RequestsService {
   }
 
   /**
-   * Ответ на уточняющий вопрос. Свободный текст дописываем к заявке и разбираем заново;
-   * ответ кнопкой (field/value) записываем в поле сразу — без вызова ИИ и без ожидания.
+   * Ответ на уточняющий вопрос. Ответ кнопкой (field/value) или «Пропустить» записываем сразу —
+   * без вызова ИИ и без ожидания; свободный текст дописываем к заявке и разбираем заново.
    */
   async answer(userId: number, requestId: number, dto: AnswerRequestDto | string) {
-    const { answer, field, value } = typeof dto === 'string' ? { answer: dto, field: undefined, value: undefined } : dto;
+    const d: Partial<AnswerRequestDto> & { answer: string } = typeof dto === 'string' ? { answer: dto } : dto;
     const req = await this.own(userId, requestId);
     if (!['draft', 'needs_info'].includes(req.status)) throw new AppError('bad_status', 'Заявка уже отправлена');
-    if (req.answers.length >= MAX_CLARIFICATIONS) {
-      throw new AppError('too_many_answers', 'Достаточно уточнений: заполните оставшиеся поля в приложении и отправьте заявку', HttpStatus.CONFLICT);
+    if (req.answers.length >= MAX_QUESTIONS) {
+      throw new AppError('too_many_answers', 'Достаточно уточнений: проверьте детали и отправьте заявку', HttpStatus.CONFLICT);
     }
-    if (field !== undefined && value !== undefined && req.categoryId) {
-      const quick = await this.quickAnswer(req, answer, field, value);
-      if (quick) return this.view(userId, requestId);
-    }
+    const defs = req.categoryId ? await this.catalog.fieldsFor(req.categoryId) : [];
+    const ask = this.askOf(req, defs);
+    if (d.field !== undefined && (await this.applyQuick(req, defs, ask, d))) return this.view(userId, requestId);
+    if (!d.answer) throw new AppError('empty', 'Напишите ответ');
+
     await this.chargeParse(userId);
+    const fields = { ...req.fields };
+    // Необязательный вопрос, на который ответили текстом, второй раз не задаём — даже если модель не поняла ответ.
+    if (ask?.optional) fields._asked = [...askedOf(req), ask.key];
     await this.db
       .update(requests)
       // confidence = null — признак «идёт разбор»: Mini App показывает, что ИИ учитывает ответ.
-      .set({ answers: [...req.answers, { q: req.question ?? '', a: answer }], status: 'draft', confidence: null, updatedAt: new Date() })
+      .set({ fields, answers: [...req.answers, { q: ask?.text ?? req.question ?? '', a: d.answer }], status: 'draft', confidence: null, updatedAt: new Date() })
       .where(eq(requests.id, requestId));
     await this.queues.parse({ requestId });
     return this.view(userId, requestId);
   }
 
-  /** Ответ кнопкой: значение проверяем по шаблону категории, следующий вопрос — тоже из шаблона. */
-  private async quickAnswer(req: RequestRow, answer: string, key: string, value: string | number | boolean): Promise<boolean> {
-    const defs = await this.catalog.fieldsFor(req.categoryId!);
-    const def = defs.find((d) => d.key === key);
-    if (!def) return false;
-    if (def.type === 'select' && !def.options?.some((o) => o.value === value)) return false;
-    if (def.type === 'boolean' && typeof value !== 'boolean') return false;
-    if (def.type === 'number' && typeof value !== 'number') return false;
+  /** Ответ кнопкой или пропуск. Значение проверяем по типу параметра или по шаблону категории. */
+  private async applyQuick(req: RequestRow, defs: FieldDef[], ask: Ask | null, d: Partial<AnswerRequestDto> & { answer: string }): Promise<boolean> {
+    const key = d.field!;
+    const v = d.value;
+    const fields: Record<string, unknown> = { ...req.fields };
+    const patch: Partial<typeof requests.$inferInsert> = {};
+    let shown = d.answer;
 
-    const fields: Record<string, unknown> = { ...req.fields, [key]: value };
+    if (d.skip) {
+      if (!(SLOT_KEYS as readonly string[]).includes(key)) return false;
+      shown = '—';
+    } else if (key === 'quantity' && typeof v === 'number' && v > 0) {
+      fields.quantity = Math.round(v);
+      patch.quantity = Math.round(v);
+    } else if (key === 'deadline' && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      patch.deadline = v;
+    } else if (key === 'budget' && typeof v === 'number' && v > 0) {
+      patch.budgetUzs = Math.round(v);
+    } else if (key === 'delivery' && typeof v === 'boolean') {
+      patch.deliveryNeeded = v;
+      if (!v) Object.assign(patch, { deliveryLat: null, deliveryLng: null, deliveryAddress: null });
+    } else if (key === 'location' && v && typeof v === 'object') {
+      Object.assign(patch, { deliveryNeeded: true, deliveryLat: v.lat, deliveryLng: v.lng, deliveryAddress: v.address ?? null });
+      shown = v.address || `${v.lat.toFixed(5)}, ${v.lng.toFixed(5)}`;
+    } else {
+      const def = defs.find((x) => x.key === key);
+      if (!def || v === undefined || typeof v === 'object') return false;
+      if (def.type === 'select' && !def.options?.some((o) => o.value === v)) return false;
+      if (def.type === 'boolean' && typeof v !== 'boolean') return false;
+      if (def.type === 'number' && typeof v !== 'number') return false;
+      fields[key] = v;
+      if (key === 'quantity' && typeof v === 'number') patch.quantity = v;
+    }
+
     delete fields._ask;
-    const answers = [...req.answers, { q: req.question ?? '', a: answer }];
+    fields._asked = [...new Set([...askedOf(req), key])];
     const miss = missingRequired(defs, fields);
     const lang = pickLang(req.lang) as Lang;
-    const next = answers.length < MAX_CLARIFICATIONS ? miss[0] : undefined;
-    if (next) fields._ask = next.key;
     await this.db
       .update(requests)
       .set({
+        ...patch,
         fields,
-        answers,
-        quantity: key === 'quantity' && typeof value === 'number' ? value : req.quantity,
+        answers: [...req.answers, { q: ask?.key === key ? ask.text : (req.question ?? ''), a: shown || String(v) }],
         missingFields: miss.map((m) => m.key),
-        question: next ? (next.ask?.[lang] ?? `${next.label[lang]}?`) : null,
-        status: miss.length ? 'needs_info' : 'draft',
+        // Поле question читает бот: там спрашиваем только обязательное.
+        question: miss[0] ? (miss[0].ask?.[lang] ?? `${miss[0].label[lang]}?`) : null,
+        status: miss.length || !req.categoryId ? 'needs_info' : 'draft',
         updatedAt: new Date(),
       })
       .where(eq(requests.id, req.id));
     this.realtime.toUser(req.authorUserId, 'request.updated', { id: req.id });
     return true;
+  }
+
+  /** Следующий вопрос ИИ к черновику. */
+  private askOf(req: RequestRow, defs: FieldDef[]): Ask | null {
+    return nextAsk({
+      lang: pickLang(req.lang) as Lang,
+      categoryKnown: !!req.categoryId,
+      freeQuestion: req.categoryId ? null : req.question,
+      defs,
+      fields: req.fields,
+      quantity: req.quantity,
+      deadline: req.deadline,
+      budgetUzs: req.budgetUzs,
+      deliveryNeeded: req.deliveryNeeded,
+      hasDeliveryPoint: req.deliveryLat != null,
+      asked: askedOf(req),
+      answers: req.answers.length,
+      llmQuestion: req.question,
+      today: new Date(),
+    });
   }
 
   /**
@@ -254,6 +304,9 @@ export class RequestsService {
         deadline: dto.deadline !== undefined ? dto.deadline : req.deadline,
         budgetUzs: dto.budgetUzs !== undefined ? dto.budgetUzs : req.budgetUzs,
         quantity: typeof fields.quantity === 'number' ? fields.quantity : req.quantity,
+        ...(dto.deliveryNeeded !== undefined && { deliveryNeeded: dto.deliveryNeeded }),
+        ...(dto.deliveryNeeded === false && { deliveryLat: null, deliveryLng: null, deliveryAddress: null }),
+        ...(dto.delivery && { deliveryNeeded: true, deliveryLat: dto.delivery.lat, deliveryLng: dto.delivery.lng, deliveryAddress: dto.delivery.address ?? null }),
         missingFields: [],
         question: null,
         status,
@@ -385,6 +438,12 @@ export class RequestsService {
       deadline: req.deadline,
       budgetUzs: req.budgetUzs,
       quantity: req.quantity,
+      delivery: {
+        needed: req.deliveryNeeded,
+        lat: req.deliveryLat,
+        lng: req.deliveryLng,
+        address: req.deliveryAddress,
+      },
       files: fileRows,
       createdAt: req.createdAt,
       submittedAt: req.submittedAt,
@@ -440,27 +499,12 @@ export class RequestsService {
       confidence: req.confidence,
       missingFields: req.missingFields,
       question: req.question,
-      quickAnswers: this.quickOptions(defs, req),
-      maxQuestions: MAX_CLARIFICATIONS,
+      ask: ['draft', 'needs_info'].includes(req.status) ? this.askOf(req, defs) : null,
       answers: req.answers,
       offers: offerRows,
       progress,
       dealId: deal?.id ?? null,
     };
-  }
-
-  /** Варианты быстрого ответа на текущий вопрос: кнопки вместо набора текста. */
-  private quickOptions(defs: FieldDef[], req: RequestRow) {
-    const key = req.fields._ask;
-    if (!req.question || typeof key !== 'string') return null;
-    const def = defs.find((d) => d.key === key);
-    if (!def) return null;
-    const lang = pickLang(req.lang) as Lang;
-    if (def.type === 'boolean') {
-      return { field: key, options: [true, false].map((v) => ({ value: v, label: v ? { ru: 'Да', uz: 'Ha', uzc: 'Ҳа' }[lang] : { ru: 'Нет', uz: "Yo'q", uzc: 'Йўқ' }[lang] })) };
-    }
-    if (def.options?.length) return { field: key, options: def.options.slice(0, 8).map((o) => ({ value: o.value, label: o.label[lang] })) };
-    return { field: key, options: [], type: def.type, unit: def.unit ?? null };
   }
 
   /**

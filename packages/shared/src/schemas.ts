@@ -98,6 +98,14 @@ export const parseRequestSchema = z.object({
 });
 export type ParseRequestDto = z.infer<typeof parseRequestSchema>;
 
+/** Точка доставки, выбранная на карте. */
+export const deliveryPointSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  address: z.string().trim().max(300).optional(),
+});
+export type DeliveryPoint = z.infer<typeof deliveryPointSchema>;
+
 export const submitRequestSchema = z.object({
   requestId: z.number().int().positive(),
   categoryId: z.number().int().positive().optional(),
@@ -106,15 +114,24 @@ export const submitRequestSchema = z.object({
   title: z.string().trim().min(3).max(200).optional(),
   deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   budgetUzs: z.number().int().positive().max(100_000_000_000).nullable().optional(),
+  deliveryNeeded: z.boolean().nullable().optional(),
+  delivery: deliveryPointSchema.nullable().optional(),
 });
 export type SubmitRequestDto = z.infer<typeof submitRequestSchema>;
 
-export const answerRequestSchema = z.object({
-  answer: z.string().trim().min(1).max(1000),
-  /** Быстрый ответ кнопкой: значение сразу записывается в поле, без повторного разбора. */
-  field: z.string().max(64).optional(),
-  value: z.union([z.string().max(200), z.number(), z.boolean()]).optional(),
-});
+export const answerRequestSchema = z
+  .object({
+    answer: z.string().trim().max(1000).default(''),
+    /**
+     * Быстрый ответ кнопкой: значение сразу записывается в поле или параметр заявки
+     * (quantity, deadline, budget, delivery, location), без повторного разбора.
+     */
+    field: z.string().max(64).optional(),
+    value: z.union([z.string().max(200), z.number(), z.boolean(), deliveryPointSchema]).optional(),
+    /** Пропустить необязательный вопрос. */
+    skip: z.boolean().optional(),
+  })
+  .refine((d) => d.answer.length > 0 || d.field !== undefined, { message: 'Пустой ответ' });
 export type AnswerRequestDto = z.infer<typeof answerRequestSchema>;
 
 export const createOfferSchema = z.object({
@@ -160,6 +177,9 @@ export const parseResultSchema = z.object({
   deadline: z.string().nullable(),
   budgetUzs: z.number().nullable(),
   quantity: z.number().nullable(),
+  /** Нужна ли доставка, если покупатель сказал об этом сам; адрес — как написал. */
+  delivery: z.boolean().nullable().default(null),
+  deliveryAddress: z.string().max(300).nullable().default(null),
   missingFields: z.array(z.string()),
   question: z.string().nullable(),
   confidence: z.number().min(0).max(1),

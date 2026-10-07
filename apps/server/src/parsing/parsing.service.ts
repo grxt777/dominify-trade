@@ -4,13 +4,14 @@ import { maskPII } from './text';
 import { CatalogService } from '../catalog/catalog';
 import { rulesParse, questionNoCategory, type CatalogEntry } from './rules-parser';
 import { anthropicParse, type LlmCallResult, type LlmImage } from './anthropic';
-import { geminiParse } from './gemini';
+import { geminiParseChain } from './gemini';
 import { transcribe } from './stt';
 import { missingRequired, REGIONS, type ParseResult } from '@dominify/shared';
 import { and, eq, gt, ne, sql } from 'drizzle-orm';
 import type { Config } from '../config';
 import { StorageService } from '../infra/storage';
 import { CONFIG, DB } from '../infra/tokens';
+import { MAX_QUESTIONS } from '../requests/clarify';
 
 type LlmArgs = {
   text: string;
@@ -20,9 +21,6 @@ type LlmArgs = {
   images: LlmImage[];
   today: string;
 };
-
-/** Сколько уточняющих вопросов ИИ задаёт по одной заявке. */
-export const MAX_CLARIFICATIONS = 2;
 
 export interface ParseOutcome {
   status: 'draft' | 'needs_info';
@@ -117,8 +115,7 @@ export class ParsingService {
     let missing: string[] = [];
     let question = result.question;
     let askKey: string | null = null;
-    // Не утомляем покупателя: после MAX_CLARIFICATIONS ответов вопросов больше нет, остальное — в форме.
-    const canAsk = req.answers.length < MAX_CLARIFICATIONS;
+    const canAsk = req.answers.length < MAX_QUESTIONS;
     if (cat && isLeaf) {
       const template = await this.catalog.fieldsFor(cat.id);
       const miss = missingRequired(template, fields);
@@ -152,6 +149,8 @@ export class ParsingService {
         regionCode: result.regionCode ?? req.regionCode,
         deadline: result.deadline ?? req.deadline,
         budgetUzs: result.budgetUzs ?? req.budgetUzs,
+        deliveryNeeded: result.delivery ?? req.deliveryNeeded,
+        deliveryAddress: req.deliveryAddress ?? result.deliveryAddress?.slice(0, 300) ?? null,
         quantity: typeof fields.quantity === 'number' ? fields.quantity : req.quantity,
         confidence: result.confidence,
         missingFields: missing,
@@ -178,7 +177,8 @@ export class ParsingService {
       return {
         fast: this.cfg.GEMINI_MODEL_FAST,
         smart: this.cfg.GEMINI_MODEL_SMART,
-        call: (a, model) => geminiParse({ ...a, apiKey: this.cfg.GEMINI_API_KEY, model }),
+        call: (a, model) =>
+          geminiParseChain({ ...a, apiKey: this.cfg.GEMINI_API_KEY, model }, [model, ...this.cfg.GEMINI_MODEL_FALLBACKS.split(',').map((m) => m.trim())]),
       };
     }
     return null;

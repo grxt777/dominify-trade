@@ -109,6 +109,7 @@ export interface RequestView {
   deadline: string | null;
   budgetUzs: number | null;
   quantity: number | null;
+  delivery: { needed: boolean | null; lat: number | null; lng: number | null; address: string | null };
   files: { id: number; mime: string; fileName: string | null }[];
   createdAt: string;
   submittedAt: string | null;
@@ -120,8 +121,7 @@ export interface RequestView {
   confidence?: number | null;
   missingFields?: string[];
   question?: string | null;
-  quickAnswers?: QuickAnswers | null;
-  maxQuestions?: number;
+  ask?: Ask | null;
   answers?: { q: string; a: string }[];
   offers?: Offer[];
   progress?: RequestProgress | null;
@@ -133,12 +133,15 @@ export interface RequestView {
   isOpen?: boolean;
 }
 
-/** Кнопки быстрого ответа на вопрос ИИ. Пустой options — поле вводится вручную (число, текст). */
-export interface QuickAnswers {
-  field: string;
-  options: { value: string | boolean; label: string }[];
-  type?: string;
-  unit?: string | null;
+/** Следующий вопрос ИИ: кнопки быстрых ответов и/или поле ввода, необязательный можно пропустить. */
+export interface Ask {
+  key: string;
+  kind: 'free' | 'field' | 'quantity' | 'deadline' | 'delivery' | 'location' | 'budget';
+  text: string;
+  options: { value: string | number | boolean; label: string }[];
+  input: 'text' | 'number' | 'date' | 'map' | null;
+  unit: string | null;
+  optional: boolean;
 }
 
 /** Воронка подбора одной волны. */

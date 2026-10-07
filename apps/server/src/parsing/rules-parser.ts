@@ -133,6 +133,10 @@ export function rulesParse(text: string, catalog: CatalogEntry[], now = new Date
   // Категория найдена и все обязательные поля на месте — заявку можно отправлять без модератора.
   const confidence = cat ? Math.min(0.9, 0.6 + 0.1 * Math.min(best!.hits, 2) + (missing.length === 0 ? 0.1 : 0)) : 0.2;
 
+  // Доставка: «привезите», «доставка», «yetkazib», «самовывоз», «заберу сам».
+  const pickup = /(самовывоз|забер[уём]|o'zim olib|олиб кет)/.test(t);
+  const delivery = pickup ? false : /(достав|привез|yetkaz|етказ|монтаж на)/.test(t) ? true : null;
+
   const oneLine = text.replace(/\s+/g, ' ').trim();
   return {
     categorySlug: cat?.slug ?? null,
@@ -142,6 +146,8 @@ export function rulesParse(text: string, catalog: CatalogEntry[], now = new Date
     deadline,
     budgetUzs,
     quantity,
+    delivery,
+    deliveryAddress: null,
     missingFields: missing.map((m) => m.key),
     question: firstAsk ? firstAsk[lang] : cat ? null : questionNoCategory(lang),
     confidence,

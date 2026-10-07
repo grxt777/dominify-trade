@@ -550,6 +550,20 @@ const D = {
   pipeSentShort: ['отправлено', 'yuborildi'],
   pipeSeenShort: ['смотрят', "ko'rishmoqda"],
   pipeOffersShort: ['предложений', 'taklif'],
+
+  // уточнения и доставка
+  aiAskNTpl: ['Вопрос {0}', 'Savol {0}'],
+  aiSkip: ['Пропустить', "O'tkazib yuborish"],
+  mapPick: ['Указать на карте', "Xaritada ko'rsatish"],
+  mapTitle: ['Точка доставки', 'Yetkazib berish manzili'],
+  mapMyLocation: ['Где я', 'Men qayerdaman'],
+  mapDone: ['Готово', 'Tayyor'],
+  mapNoGeo: ['Не удалось определить местоположение — передвиньте карту вручную', "Joylashuvni aniqlab bo'lmadi — xaritani qo'lda suring"],
+  deliveryLabel: ['Доставка', 'Yetkazib berish'],
+  pickupLabel: ['Самовывоз', 'Olib ketish'],
+  deliveryNeed: ['Нужна доставка', 'Yetkazib berish kerak'],
+  deliveryOpenMap: ['Открыть на карте', 'Xaritada ochish'],
+  deliveryChangePoint: ['Изменить точку', "Nuqtani o'zgartirish"],
 } as const;
 
 export type Key = keyof typeof D;
