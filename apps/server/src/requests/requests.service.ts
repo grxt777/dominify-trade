@@ -14,14 +14,17 @@ import {
   type Db,
 } from '@dominify/db';
 import {
+  DEFAULT_WAVES,
   missingRequired,
   OPEN_REQUEST_STATUSES,
+  type FieldDef,
   pickLang,
+  type AnswerRequestDto,
   type Lang,
   type ParseRequestDto,
   type SubmitRequestDto,
 } from '@dominify/shared';
-import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 import IORedis from 'ioredis';
 import type { Config } from '../config';
 import { AppError, forbidden, notFound } from '../common/http';
@@ -33,14 +36,14 @@ import { QueueService } from '../infra/queues';
 import { RealtimeEmitter } from '../infra/realtime-emitter';
 import { CONFIG, DB, REDIS } from '../infra/tokens';
 import { NotificationsService } from '../notifications/notifications.service';
-import type { ParseOutcome } from '../parsing/parsing.service';
+import { MAX_CLARIFICATIONS, type ParseOutcome } from '../parsing/parsing.service';
 import { RequestAccess } from './access';
 import { summarize } from './summary';
 
 type RequestRow = typeof requests.$inferSelect;
+/** Воронка подбора одной волны: сколько поставщиков рассмотрели и сколько получили заявку. */
+type Funnel = { pool: number; region: number; ready: number; sent: number };
 
-/** После стольких ответов бот перестаёт спрашивать: остальное покупатель заполняет в форме. */
-const MAX_CLARIFICATIONS = 4;
 /** Столько же, сколько допускает схема заявки из Mini App. */
 const MAX_REQUEST_FILES = 10;
 
@@ -125,20 +128,61 @@ export class RequestsService {
     }
   }
 
-  /** Ответ на уточняющий вопрос: дописываем к заявке и разбираем заново. */
-  async answer(userId: number, requestId: number, answer: string) {
+  /**
+   * Ответ на уточняющий вопрос. Свободный текст дописываем к заявке и разбираем заново;
+   * ответ кнопкой (field/value) записываем в поле сразу — без вызова ИИ и без ожидания.
+   */
+  async answer(userId: number, requestId: number, dto: AnswerRequestDto | string) {
+    const { answer, field, value } = typeof dto === 'string' ? { answer: dto, field: undefined, value: undefined } : dto;
     const req = await this.own(userId, requestId);
     if (!['draft', 'needs_info'].includes(req.status)) throw new AppError('bad_status', 'Заявка уже отправлена');
     if (req.answers.length >= MAX_CLARIFICATIONS) {
       throw new AppError('too_many_answers', 'Достаточно уточнений: заполните оставшиеся поля в приложении и отправьте заявку', HttpStatus.CONFLICT);
     }
+    if (field !== undefined && value !== undefined && req.categoryId) {
+      const quick = await this.quickAnswer(req, answer, field, value);
+      if (quick) return this.view(userId, requestId);
+    }
     await this.chargeParse(userId);
     await this.db
       .update(requests)
-      .set({ answers: [...req.answers, { q: req.question ?? '', a: answer }], status: 'draft', updatedAt: new Date() })
+      // confidence = null — признак «идёт разбор»: Mini App показывает, что ИИ учитывает ответ.
+      .set({ answers: [...req.answers, { q: req.question ?? '', a: answer }], status: 'draft', confidence: null, updatedAt: new Date() })
       .where(eq(requests.id, requestId));
     await this.queues.parse({ requestId });
     return this.view(userId, requestId);
+  }
+
+  /** Ответ кнопкой: значение проверяем по шаблону категории, следующий вопрос — тоже из шаблона. */
+  private async quickAnswer(req: RequestRow, answer: string, key: string, value: string | number | boolean): Promise<boolean> {
+    const defs = await this.catalog.fieldsFor(req.categoryId!);
+    const def = defs.find((d) => d.key === key);
+    if (!def) return false;
+    if (def.type === 'select' && !def.options?.some((o) => o.value === value)) return false;
+    if (def.type === 'boolean' && typeof value !== 'boolean') return false;
+    if (def.type === 'number' && typeof value !== 'number') return false;
+
+    const fields: Record<string, unknown> = { ...req.fields, [key]: value };
+    delete fields._ask;
+    const answers = [...req.answers, { q: req.question ?? '', a: answer }];
+    const miss = missingRequired(defs, fields);
+    const lang = pickLang(req.lang) as Lang;
+    const next = answers.length < MAX_CLARIFICATIONS ? miss[0] : undefined;
+    if (next) fields._ask = next.key;
+    await this.db
+      .update(requests)
+      .set({
+        fields,
+        answers,
+        quantity: key === 'quantity' && typeof value === 'number' ? value : req.quantity,
+        missingFields: miss.map((m) => m.key),
+        question: next ? (next.ask?.[lang] ?? `${next.label[lang]}?`) : null,
+        status: miss.length ? 'needs_info' : 'draft',
+        updatedAt: new Date(),
+      })
+      .where(eq(requests.id, req.id));
+    this.realtime.toUser(req.authorUserId, 'request.updated', { id: req.id });
+    return true;
   }
 
   /**
@@ -187,7 +231,8 @@ export class RequestsService {
     if (!categoryId) throw new AppError('no_category', 'Выберите категорию');
     const cat = await this.catalog.byId(categoryId);
     if (!cat) throw new AppError('bad_category', 'Категория не найдена');
-    const fields = { ...req.fields, ...(dto.fields ?? {}) };
+    const fields: Record<string, unknown> = { ...req.fields, ...(dto.fields ?? {}) };
+    delete fields._ask;
     const defs = await this.catalog.fieldsFor(categoryId);
     const missing = missingRequired(defs, fields);
     if (missing.length) {
@@ -349,10 +394,13 @@ export class RequestsService {
     };
 
     if (role.kind === 'supplier') {
-      await this.db
+      const firstSeen = await this.db
         .update(requestDeliveries)
-        .set({ seenAt: sql`coalesce(${requestDeliveries.seenAt}, now())` })
-        .where(eq(requestDeliveries.id, role.deliveryId));
+        .set({ seenAt: new Date() })
+        .where(and(eq(requestDeliveries.id, role.deliveryId), isNull(requestDeliveries.seenAt)))
+        .returning({ id: requestDeliveries.id });
+      // Покупатель видит, что заявку открыли: счётчик «смотрят» растёт у него на глазах.
+      if (firstSeen.length) this.realtime.toRequest(requestId, 'request.progress', { id: requestId });
       const [mine] = await this.db
         .select()
         .from(offers)
@@ -380,6 +428,7 @@ export class RequestsService {
     }
 
     const offerRows = await this.offersFor(requestId);
+    const progress = req.submittedAt ? await this.progressOf(req, offerRows.length) : null;
     const [deal] = await this.db
       .select({ id: deals.id })
       .from(deals)
@@ -391,9 +440,61 @@ export class RequestsService {
       confidence: req.confidence,
       missingFields: req.missingFields,
       question: req.question,
+      quickAnswers: this.quickOptions(defs, req),
+      maxQuestions: MAX_CLARIFICATIONS,
       answers: req.answers,
       offers: offerRows,
+      progress,
       dealId: deal?.id ?? null,
+    };
+  }
+
+  /** Варианты быстрого ответа на текущий вопрос: кнопки вместо набора текста. */
+  private quickOptions(defs: FieldDef[], req: RequestRow) {
+    const key = req.fields._ask;
+    if (!req.question || typeof key !== 'string') return null;
+    const def = defs.find((d) => d.key === key);
+    if (!def) return null;
+    const lang = pickLang(req.lang) as Lang;
+    if (def.type === 'boolean') {
+      return { field: key, options: [true, false].map((v) => ({ value: v, label: v ? { ru: 'Да', uz: 'Ha', uzc: 'Ҳа' }[lang] : { ru: 'Нет', uz: "Yo'q", uzc: 'Йўқ' }[lang] })) };
+    }
+    if (def.options?.length) return { field: key, options: def.options.slice(0, 8).map((o) => ({ value: o.value, label: o.label[lang] })) };
+    return { field: key, options: [], type: def.type, unit: def.unit ?? null };
+  }
+
+  /**
+   * Как идёт рассылка — для экрана ожидания покупателя. Только реальные данные:
+   * воронка подбора, записанная при рассылке, и записи request_deliveries.
+   */
+  private async progressOf(req: RequestRow, offersCount: number) {
+    const [d] = await this.db
+      .select({
+        delivered: sql<number>`count(*)::int`,
+        notified: sql<number>`(count(*) filter (where ${requestDeliveries.notifyAt} <= now()))::int`,
+        seen: sql<number>`(count(*) filter (where ${requestDeliveries.seenAt} is not null))::int`,
+        nextNotifyAt: sql<string | null>`min(${requestDeliveries.notifyAt}) filter (where ${requestDeliveries.notifyAt} > now())`,
+        firstAt: sql<string | null>`min(${requestDeliveries.createdAt})`,
+        typicalMin: sql<number | null>`percentile_cont(0.5) within group (order by ${companies.medianResponseMin})::int`,
+      })
+      .from(requestDeliveries)
+      .innerJoin(companies, eq(companies.id, requestDeliveries.supplierCompanyId))
+      .where(eq(requestDeliveries.requestId, req.id));
+    const funnel = (req.fields._funnel as Record<string, Funnel> | undefined) ?? {};
+    const secondWaveAt =
+      req.wave === 1 && offersCount < DEFAULT_WAVES.minOffersAfterWave1 && d.firstAt
+        ? new Date(new Date(d.firstAt).getTime() + this.cfg.WAVE1_WAIT_MIN * 60_000).toISOString()
+        : null;
+    return {
+      funnel: funnel['1'] ?? null,
+      funnel2: funnel['2'] ?? null,
+      delivered: d.delivered,
+      notified: d.notified,
+      seen: d.seen,
+      offers: offersCount,
+      nextNotifyAt: d.nextNotifyAt,
+      secondWaveAt,
+      typicalResponseMin: d.typicalMin,
     };
   }
 

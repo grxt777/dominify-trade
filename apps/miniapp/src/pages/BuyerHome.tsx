@@ -17,7 +17,7 @@ export function BuyerHome() {
       <div className="hero-card">
         <h2>{t('newRequest')}</h2>
         <div className="muted small">{t('newRequestHint')}</div>
-        <button className="btn block" onClick={() => nav('/new')}>
+        <button className="btn block" onClick={() => nav('/?focus=1')}>
           + {t('newRequest')}
         </button>
       </div>

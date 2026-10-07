@@ -190,7 +190,7 @@ function Steps({ items }: { items: { title: string; text: ReactNode }[] }) {
 
 /* ───────── Главная покупателя: витрина ───────── */
 
-function LiveStats() {
+export function LiveStats() {
   const t = useT();
   const s = useQuery({ queryKey: ['stats'], queryFn: () => get<Stats>('/v1/gigs/stats'), staleTime: 5 * 60_000 });
   if (!s.data || !s.data.dealsCompleted) return null;
@@ -404,7 +404,7 @@ export function MarketList() {
 
   return (
     <>
-      <BackButton to="/" />
+      <BackButton to="/catalog" />
       <h1>{title ? t(title.label) : q ? `«${q}»` : t('popularGigs')}</h1>
       <div style={{ marginBottom: 10 }}>
         <SearchBar key={q} initial={q} onSearch={(v) => set('q', v)} />

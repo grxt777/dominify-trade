@@ -44,7 +44,7 @@ export class RequestsController {
   @Post('requests/:id/answer')
   @RateLimit('answer', 30, 3600)
   answer(@CurrentUser() u: AuthUser, @Param('id', ParseIntPipe) id: number, @Body(new ZodPipe(answerRequestSchema)) dto: AnswerRequestDto) {
-    return this.requests.answer(u.id, id, dto.answer);
+    return this.requests.answer(u.id, id, dto);
   }
 
   @Post('requests/:id/cancel')

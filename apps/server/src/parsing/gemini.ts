@@ -65,13 +65,39 @@ export async function geminiParse(opts: {
   images: LlmImage[];
   today: string;
   timeoutMs?: number;
+  retryDelaysMs?: number[];
   fetchImpl?: typeof fetch;
 }): Promise<LlmCallResult> {
   const parts: unknown[] = opts.images.map((img) => ({ inlineData: { mimeType: img.mime, data: img.base64 } }));
   parts.push({ text: buildUserText(opts.text, opts.answers) });
 
+  // При всплесках нагрузки Gemini отвечает 503/429 или зависает: одна повторная попытка с паузой
+  // дешевле, чем откат на разбор правилами, а короткий таймаут не держит покупателя дольше ~30 с.
+  const delays = opts.retryDelaysMs ?? [1000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await geminiOnce(opts, parts);
+    } catch (e) {
+      const timedOut = (e as Error).name === 'AbortError' || (e as Error).name === 'TimeoutError';
+      const retriable = timedOut || (e instanceof GeminiHttpError && (e.status === 503 || e.status === 429 || e.status === 500));
+      if (!retriable || attempt >= delays.length) throw e;
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+}
+
+class GeminiHttpError extends Error {
+  constructor(
+    readonly status: number,
+    body: string,
+  ) {
+    super(`Gemini API ${status}: ${body.slice(0, 300)}`);
+  }
+}
+
+async function geminiOnce(opts: Parameters<typeof geminiParse>[0], parts: unknown[]): Promise<LlmCallResult> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 30_000);
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 15_000);
   try {
     const res = await (opts.fetchImpl ?? fetch)(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(opts.model)}:generateContent`,
@@ -87,11 +113,13 @@ export async function geminiParse(opts: {
             responseJsonSchema: GEMINI_SCHEMA,
             temperature: 0.1,
             maxOutputTokens: 2048,
+            // Извлечение полей не требует долгих рассуждений: низкий уровень заметно быстрее.
+            thinkingConfig: { thinkingLevel: 'low' },
           },
         }),
       },
     );
-    if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) throw new GeminiHttpError(res.status, await res.text());
     const data = (await res.json()) as GeminiResponse;
     if (data.promptFeedback?.blockReason) throw new Error(`Gemini заблокировал запрос: ${data.promptFeedback.blockReason}`);
     const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';

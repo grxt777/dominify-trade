@@ -21,6 +21,9 @@ type LlmArgs = {
   today: string;
 };
 
+/** Сколько уточняющих вопросов ИИ задаёт по одной заявке. */
+export const MAX_CLARIFICATIONS = 2;
+
 export interface ParseOutcome {
   status: 'draft' | 'needs_info';
   result: ParseResult;
@@ -113,17 +116,29 @@ export class ParsingService {
 
     let missing: string[] = [];
     let question = result.question;
+    let askKey: string | null = null;
+    // Не утомляем покупателя: после MAX_CLARIFICATIONS ответов вопросов больше нет, остальное — в форме.
+    const canAsk = req.answers.length < MAX_CLARIFICATIONS;
     if (cat && isLeaf) {
       const template = await this.catalog.fieldsFor(cat.id);
       const miss = missingRequired(template, fields);
       missing = miss.map((m) => m.key);
-      if (miss.length === 0) question = null;
-      else if (!question) question = miss.find((m) => m.ask)?.ask?.[result.lang] ?? null;
+      const first = miss[0];
+      if (!first || !canAsk) question = null;
+      else {
+        askKey = first.key;
+        // У поля с вариантами вопрос берём из шаблона: кнопки быстрых ответов должны совпадать с вопросом.
+        const choice = first.type === 'boolean' || !!first.options?.length;
+        const templated = first.ask?.[result.lang] ?? `${first.label[result.lang]}?`;
+        question = choice ? templated : question || templated;
+      }
     } else {
-      question = question ?? questionNoCategory(result.lang);
+      question = canAsk ? (question ?? questionNoCategory(result.lang)) : null;
     }
     result.missingFields = missing;
     result.question = question;
+    delete fields._ask;
+    if (askKey) fields._ask = askKey;
 
     const duplicateOf = await this.findDuplicate(req.authorUserId, requestId, req.rawText);
     const status: ParseOutcome['status'] = !cat || missing.length ? 'needs_info' : 'draft';

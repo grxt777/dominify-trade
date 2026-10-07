@@ -120,14 +120,46 @@ export interface RequestView {
   confidence?: number | null;
   missingFields?: string[];
   question?: string | null;
+  quickAnswers?: QuickAnswers | null;
+  maxQuestions?: number;
   answers?: { q: string; a: string }[];
   offers?: Offer[];
+  progress?: RequestProgress | null;
   dealId: number | null;
   // поставщик
   companyId?: number;
   buyer?: { name: string; trustLevel: number };
   myOffer?: { id: number; priceUzs: number; leadTimeDays: number; comment: string | null; status: string } | null;
   isOpen?: boolean;
+}
+
+/** Кнопки быстрого ответа на вопрос ИИ. Пустой options — поле вводится вручную (число, текст). */
+export interface QuickAnswers {
+  field: string;
+  options: { value: string | boolean; label: string }[];
+  type?: string;
+  unit?: string | null;
+}
+
+/** Воронка подбора одной волны. */
+export interface Funnel {
+  pool: number;
+  region: number;
+  ready: number;
+  sent: number;
+}
+
+/** Как идёт рассылка заявки: реальные цифры с сервера. */
+export interface RequestProgress {
+  funnel: Funnel | null;
+  funnel2: Funnel | null;
+  delivered: number;
+  notified: number;
+  seen: number;
+  offers: number;
+  nextNotifyAt: string | null;
+  secondWaveAt: string | null;
+  typicalResponseMin: number | null;
 }
 
 /** Заказ с витрины внутри заявки. */

@@ -111,6 +111,9 @@ export type SubmitRequestDto = z.infer<typeof submitRequestSchema>;
 
 export const answerRequestSchema = z.object({
   answer: z.string().trim().min(1).max(1000),
+  /** Быстрый ответ кнопкой: значение сразу записывается в поле, без повторного разбора. */
+  field: z.string().max(64).optional(),
+  value: z.union([z.string().max(200), z.number(), z.boolean()]).optional(),
 });
 export type AnswerRequestDto = z.infer<typeof answerRequestSchema>;
 

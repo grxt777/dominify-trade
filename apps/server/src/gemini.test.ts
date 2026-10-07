@@ -69,6 +69,24 @@ describe('Gemini', () => {
     await expect(geminiParse({ ...base, fetchImpl: fakeFetch({ candidates: [{ finishReason: 'SAFETY' }] }).impl })).rejects.toThrow(/SAFETY/);
   });
 
+  it('при 503 повторяет запрос, а 400 не повторяет', async () => {
+    const ok = { candidates: [{ content: { parts: [{ text: JSON.stringify(answer) }] } }] };
+    let n = 0;
+    const flaky = (async () => {
+      n++;
+      return n === 1
+        ? new Response(JSON.stringify({ error: { message: 'high demand' } }), { status: 503 })
+        : new Response(JSON.stringify(ok), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await geminiParse({ ...base, fetchImpl: flaky, retryDelaysMs: [0, 0] });
+    expect(n).toBe(2);
+    expect(r.result.categorySlug).toBe('print.business-cards');
+
+    const bad = fakeFetch({ error: { message: 'bad' } }, 400);
+    await expect(geminiParse({ ...base, fetchImpl: bad.impl, retryDelaysMs: [0, 0] })).rejects.toThrow(/400/);
+    expect(bad.calls).toHaveLength(1);
+  });
+
   it('невалидная структура отклоняется', () => {
     expect(() => geminiToResult({ ...answer, lang: 'en' })).toThrow();
     expect(geminiToResult({ ...answer, confidence: 1.4 }).confidence).toBe(1);

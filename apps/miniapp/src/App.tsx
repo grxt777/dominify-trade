@@ -13,6 +13,7 @@ import { Icons, MainButton, Section, Spinner, Splash } from './ui';
 import { lazy, Suspense } from 'react';
 
 // Экраны грузятся по требованию: первый экран открывается быстрее на мобильном интернете.
+const Home = lazy(() => import('./pages/Home').then((m) => ({ default: m.Home })));
 const BuyerHome = lazy(() => import('./pages/BuyerHome').then((m) => ({ default: m.BuyerHome })));
 const MarketHome = lazy(() => import('./pages/Market').then((m) => ({ default: m.MarketHome })));
 const MarketList = lazy(() => import('./pages/Market').then((m) => ({ default: m.MarketList })));
@@ -52,7 +53,7 @@ export function App() {
 
   useEffect(() => {
     // Код главной грузится, пока играет заставка.
-    void import('./pages/Market');
+    void import('./pages/Home');
     login()
       .then(async (r) => {
         const param = r.startParam ?? startRoute();
@@ -149,6 +150,12 @@ function Consent() {
   );
 }
 
+/** Свободная заявка пишется на главной; /new остаётся для заказа услуги с витрины (?gig=). */
+function NewRoute() {
+  const loc = useLocation();
+  return new URLSearchParams(loc.search).get('gig') ? <NewRequest /> : <Navigate to="/?focus=1" replace />;
+}
+
 function Shell() {
   const t = useT();
   const { me, setMe, supplierCompanyId } = useSession();
@@ -184,8 +191,8 @@ function Shell() {
           { to: '/profile', label: t('tabProfile'), icon: Icons.user },
         ]
       : [
-          { to: '/', label: t('tabHome'), icon: Icons.home },
-          { to: '/orders', label: t('tabOrders'), icon: Icons.list },
+          { to: '/', label: t('tabHome'), icon: Icons.home, alsoActive: '/orders' },
+          { to: '/catalog', label: t('tabCatalog'), icon: Icons.store, alsoActive: '/market' },
           { to: '/deals', label: t('tabDeals'), icon: Icons.handshake },
           { to: '/chats', label: t('tabChats'), icon: Icons.chat, badge: unread },
           { to: '/profile', label: t('tabProfile'), icon: Icons.user },
@@ -207,13 +214,14 @@ function Shell() {
       <Suspense fallback={<Spinner />}>
       <div className={`page ${back ? 'back' : ''}`} key={loc.pathname}>
       <Routes>
-        <Route path="/" element={role === 'supplier' ? <Navigate to="/feed" replace /> : <MarketHome />} />
+        <Route path="/" element={role === 'supplier' ? <Navigate to="/feed" replace /> : <Home />} />
+        <Route path="/catalog" element={<MarketHome />} />
         <Route path="/orders" element={<BuyerHome />} />
         <Route path="/market" element={<MarketList />} />
         <Route path="/gigs/:id" element={<GigPage />} />
         <Route path="/my-gigs" element={supplierCompanyId ? <MyGigs /> : <Navigate to="/onboarding" replace />} />
         <Route path="/my-gigs/:id" element={supplierCompanyId ? <GigEditor /> : <Navigate to="/onboarding" replace />} />
-        <Route path="/new" element={<NewRequest />} />
+        <Route path="/new" element={<NewRoute />} />
         <Route path="/requests/:id" element={<RequestPage />} />
         <Route path="/feed" element={supplierCompanyId ? <Feed /> : <Navigate to="/onboarding" replace />} />
         <Route path="/offers" element={<MyOffers />} />

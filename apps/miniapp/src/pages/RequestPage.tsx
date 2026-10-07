@@ -8,8 +8,11 @@ import { useSession } from '../session';
 import { useSocketEvent } from '../socket';
 import { confetti } from '../motion';
 import { confirm, openLink } from '../tg';
-import { BackButton, Empty, fmtDate, MainButton, money, regionName, Section, Spinner, Stars, StatusPill, TrustBadge, useToast } from '../ui';
+import { BackButton, Empty, fmtDate, Icons, MainButton, money, regionName, Section, Spinner, Stars, StatusPill, TrustBadge, useToast } from '../ui';
 import { CategorySelect, FieldInput, RegionSelect, useLeafCategories } from './fields';
+import { AiThinking, AiQuestion, FunnelBar, MatchPipeline, Understood } from './ai';
+
+const WAITING = ['submitted', 'wave_1', 'wave_2', 'moderation'];
 
 export function RequestPage() {
   const { id } = useParams();
@@ -21,13 +24,18 @@ export function RequestPage() {
     // Пока воркер разбирает заявку, опрашиваем раз в полторы секунды (на случай, если сокет не подключён).
     refetchInterval: (query) => {
       const d = query.state.data;
-      return d && d.role === 'author' && d.status === 'draft' && d.confidence == null ? 1500 : false;
+      if (!d || d.role !== 'author') return false;
+      if (d.status === 'draft' && d.confidence == null) return 1500;
+      // Ждём откликов: сокет приносит события сразу, опрос — запасной путь (и для отложенной рассылки по тарифам).
+      if (WAITING.includes(d.status)) return 20_000;
+      return false;
     },
   });
   const refresh = () => qc.invalidateQueries({ queryKey: ['request', reqId] });
   useSocketEvent('request.updated', refresh, `request:${reqId}`);
   useSocketEvent('offer.created', refresh, `request:${reqId}`);
   useSocketEvent('offer.updated', refresh, `request:${reqId}`);
+  useSocketEvent('request.progress', refresh, `request:${reqId}`);
 
   if (q.isLoading) return <><BackButton /><Spinner /></>;
   if (q.error || !q.data) return <><BackButton /><Empty>{(q.error as Error)?.message}</Empty></>;
@@ -129,8 +137,11 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
   const [regionCode, setRegionCode] = useState<string>(r.regionCode ?? 'tashkent');
   const [deadline, setDeadline] = useState<string>(r.deadline ?? '');
   const [budget, setBudget] = useState<string>(r.budgetUzs ? String(r.budgetUzs) : '');
-  const [answer, setAnswer] = useState('');
   const [busy, setBusy] = useState(false);
+  const [thinking, setThinking] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const answered = r.answers?.length ?? 0;
+  useEffect(() => setThinking(false), [answered, r.confidence]);
 
   // После нового разбора подтягиваем то, что нашла модель.
   useEffect(() => {
@@ -149,20 +160,6 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
   }, [leaves, categoryId, r.fieldDefs]);
 
   const missing = defs.filter((d) => d.required && (fields[d.key] === undefined || fields[d.key] === null || fields[d.key] === ''));
-
-  const sendAnswer = async () => {
-    if (!answer.trim()) return;
-    setBusy(true);
-    try {
-      await post(`/v1/requests/${r.id}/answer`, { answer: answer.trim() });
-      setAnswer('');
-      onChange();
-    } catch (e) {
-      toast((e as Error).message, 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const submit = async () => {
     setBusy(true);
@@ -184,32 +181,24 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
     }
   };
 
-  if (parsing) {
+  // Первый разбор — на весь экран: видно, как ИИ читает заявку и что именно делает.
+  if (parsing && answered === 0) {
     return (
       <>
-        <BackButton to="/orders" />
+        <BackButton to="/" />
         <h1>{t('parsing')}</h1>
         <OrderCard r={r} />
-        <Section>
-          <div className="stack">
-            <div className="skeleton" style={{ width: '70%' }} />
-            <div className="skeleton" style={{ width: '50%' }} />
-            <div className="skeleton" style={{ width: '60%' }} />
-            <div className="muted small">{t('parsingHint')}</div>
-          </div>
-        </Section>
-        {r.rawText && (
-          <Section>
-            <div className="muted small" style={{ whiteSpace: 'pre-wrap' }}>{r.rawText}</div>
-          </Section>
-        )}
+        <AiThinking text={r.rawText} hasFiles={r.files.length > 0} />
       </>
     );
   }
 
+  // Вопросы закончились, а обязательные поля не заполнены — форма открыта сразу.
+  const formOpen = showForm || (!r.question && !parsing && (missing.length > 0 || !categoryId));
+
   return (
     <>
-      <BackButton to="/orders" />
+      <BackButton to="/" />
       <h1>{t('checkAndSend')}</h1>
       <OrderCard r={r} />
       {r.duplicateOf && (
@@ -220,43 +209,47 @@ function DraftView({ r, onChange }: { r: RequestView; onChange: () => void }) {
           </div>
         </Section>
       )}
-      {r.question && (
-        <Section title={t('question')}>
-          <div className="stack">
-            <div className="question">{r.question}</div>
-            <div className="row" style={{ flexWrap: 'nowrap' }}>
-              <input className="input" placeholder={t('answerPlaceholder')} value={answer} onChange={(e) => setAnswer(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && sendAnswer()} />
-              <button className="btn" onClick={sendAnswer} disabled={busy || !answer.trim()}>
-                {t('answer')}
-              </button>
-            </div>
-          </div>
-        </Section>
-      )}
-      <Section>
-        <div className="stack">
-          <CategorySelect value={categoryId} onChange={setCategoryId} />
-          {defs.map((d) => (
-            <FieldInput key={d.key} def={d} value={fields[d.key]} onChange={(v) => setFields((f) => ({ ...f, [d.key]: v }))} />
-          ))}
-          <RegionSelect value={regionCode} onChange={setRegionCode} />
-          <label className="field">
-            <span>{t('deadline')}</span>
-            <input className="input" type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
-          </label>
-          <label className="field">
-            <span>{t('budget')}</span>
-            <input className="input" type="number" inputMode="numeric" value={budget} onChange={(e) => setBudget(e.target.value)} />
-          </label>
+      <Understood r={r} />
+      {parsing || thinking ? (
+        <AiThinking compact />
+      ) : r.question ? (
+        <AiQuestion r={r} onAnswered={onChange} onThinking={() => setThinking(true)} />
+      ) : (
+        <div className={`ai-ready ${missing.length || !categoryId ? 'warn' : ''}`}>
+          {missing.length || !categoryId ? t('aiFillRest') : <>{Icons.check} {t('aiReady')}</>}
         </div>
-        <Files files={r.files} />
-      </Section>
+      )}
+      {formOpen ? (
+        <Section>
+          <div className="stack">
+            <CategorySelect value={categoryId} onChange={setCategoryId} />
+            {defs.map((d) => (
+              <FieldInput key={d.key} def={d} value={fields[d.key]} onChange={(v) => setFields((f) => ({ ...f, [d.key]: v }))} />
+            ))}
+            <RegionSelect value={regionCode} onChange={setRegionCode} />
+            <label className="field">
+              <span>{t('deadline')}</span>
+              <input className="input" type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>{t('budget')}</span>
+              <input className="input" type="number" inputMode="numeric" value={budget} onChange={(e) => setBudget(e.target.value)} />
+            </label>
+          </div>
+          <Files files={r.files} />
+        </Section>
+      ) : (
+        <button className="cta-row" onClick={() => setShowForm(true)}>
+          <span className="cell-main">{t('editDetails')}</span>
+          <span className="chev" />
+        </button>
+      )}
       {r.rawText && (
         <Section>
           <div className="muted small" style={{ whiteSpace: 'pre-wrap' }}>{r.rawText}</div>
         </Section>
       )}
-      <MainButton text={r.order ? t('sendOrder') : t('sendToSuppliers')} onClick={submit} loading={busy} disabled={!categoryId || missing.length > 0} />
+      <MainButton text={r.order ? t('sendOrder') : t('sendToSuppliers')} onClick={submit} loading={busy} disabled={!categoryId || missing.length > 0 || parsing || thinking} />
     </>
   );
 }
@@ -299,9 +292,10 @@ function AuthorView({ r, onChange }: { r: RequestView; onChange: () => void }) {
 
   return (
     <>
-      <BackButton to="/orders" />
+      <BackButton to="/" />
       <h1>{r.title || `#${r.id}`}</h1>
       <OrderCard r={r} />
+      {(open || r.status === 'moderation') && (offers.length === 0 ? <MatchPipeline r={r} /> : <FunnelBar r={r} />)}
       <Section>
         <div className="row between" style={{ marginBottom: 10 }}>
           <StatusPill status={r.status} />
@@ -309,12 +303,6 @@ function AuthorView({ r, onChange }: { r: RequestView; onChange: () => void }) {
         </div>
         <Details r={r} />
         <Files files={r.files} />
-        {r.status === 'moderation' && <p className="muted small">{t('moderationInfo')}</p>}
-        {open && offers.length === 0 && r.wave > 0 && (
-          <p className="muted small">
-            {t('waveInfo')} {r.wave}. {t('waitingOffers')}…
-          </p>
-        )}
       </Section>
 
       {r.dealId && (

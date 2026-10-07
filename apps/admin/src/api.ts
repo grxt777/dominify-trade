@@ -1,5 +1,5 @@
 export const API_URL: string = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? 'http://localhost:3000';
-export const BOT_USERNAME: string = (import.meta.env.VITE_BOT_USERNAME as string | undefined) ?? 'leetvertexbot';
+export const BOT_USERNAME: string = (import.meta.env.VITE_BOT_USERNAME as string | undefined) ?? 'dominifytradebot';
 
 const KEY = 'dominify_admin_token';
 

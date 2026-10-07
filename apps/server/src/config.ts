@@ -17,7 +17,7 @@ const schema = z.object({
 
   // Telegram
   BOT_TOKEN: z.string().min(10),
-  BOT_USERNAME: z.string().default('leetvertexbot'),
+  BOT_USERNAME: z.string().default('dominifytradebot'),
   /** Короткое имя Mini App в BotFather: ссылка t.me/<бот>/<имя>?startapp=... */
   MINIAPP_SHORT_NAME: z.string().default('app'),
   BOT_WEBHOOK_SECRET: z.string().default(''),

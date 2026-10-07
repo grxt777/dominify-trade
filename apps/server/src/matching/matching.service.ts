@@ -149,6 +149,15 @@ export class MatchingService {
     const preferred = wave === 1 && req.preferredCompanyId && !exclude.has(req.preferredCompanyId) ? await this.preferredOf(req) : null;
     if (preferred) exclude.add(preferred);
     const picked = pickWave(candidates, exclude, preferred ? size - 1 : size, new Date());
+    // Воронка подбора для экрана ожидания покупателя: те же фильтры, что внутри pickWave.
+    const inRegion = candidates.filter((c) => c.servesRegion || c.deliversNationwide);
+    const funnel = {
+      pool: candidates.length,
+      region: inRegion.length,
+      ready: inRegion.filter((c) => !exclude.has(c.companyId) && c.deliveriesToday < DEFAULT_WAVES.dailyLimit).length + (preferred ? 1 : 0),
+      sent: picked.length + (preferred ? 1 : 0),
+    };
+    const prevFunnel = (req.fields._funnel as Record<string, unknown> | undefined) ?? {};
 
     const nextStatus = req.status === 'has_offers' ? 'has_offers' : wave === 1 ? 'wave_1' : 'wave_2';
     const list = picked.map((p) => ({ companyId: p.companyId, score: p.score, delayMin: delays.get(p.companyId) ?? 0 }));
@@ -157,7 +166,7 @@ export class MatchingService {
     const inserted = await this.db.transaction(async (tx) => {
       const [upd] = await tx
         .update(requests)
-        .set({ wave, status: nextStatus, updatedAt: new Date() })
+        .set({ wave, status: nextStatus, fields: { ...req.fields, _funnel: { ...prevFunnel, [wave]: funnel } }, updatedAt: new Date() })
         .where(and(eq(requests.id, requestId), sql`${requests.wave} < ${wave}`))
         .returning({ id: requests.id });
       if (!upd) return null;
@@ -165,6 +174,7 @@ export class MatchingService {
     });
     if (inserted === null) return this.resumeDeliveries(req, wave);
 
+    this.realtime.toRequest(requestId, 'request.progress', { id: requestId, wave });
     if (!list.length) {
       if (wave === 1 || sent.length === 0) await this.toManual(requestId, 'request_no_suppliers', 'Нет подходящих поставщиков');
       this.log.log(`Заявка ${requestId}: волна ${wave} пустая`);
@@ -173,6 +183,7 @@ export class MatchingService {
 
     await this.notifyDeliveries(req, inserted);
     await this.scheduleFollowUp(requestId, wave);
+    this.realtime.toRequest(requestId, 'request.progress', { id: requestId, wave });
     this.analytics.track('request.dispatched', null, { requestId, wave, count: list.length, preferred: !!preferred });
     return list.length;
   }
